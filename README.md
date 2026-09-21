@@ -24,7 +24,7 @@ For Alpha Packed (DeoVR alpha video format)
 
 For WebM VP9 Alpha, the VR player I have confirmed is:
 
-- **[r800zzvrplayer 0.5 or later](https://vr180g.com/pico/vrplayer.php?l=en)
+- **[r800zzvrplayer 0.6 or later](https://vr180g.com/pico/vrplayer.php?l=en)
 **
 
 ## Features
