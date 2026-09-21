@@ -1,0 +1,3 @@
+#include "resource.h"
+
+IDI_APP_ICON ICON "r800zzXR_dlnaServer_logo.ico"
