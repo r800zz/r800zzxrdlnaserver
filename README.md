@@ -6,6 +6,10 @@ A Windows DLNA server for XR video playback on PICO, Meta Quest, and other compa
 
 `r800zzXRdlnaServer` is a native C++ application. It uses the FFmpeg libraries directly and does not launch Python or `ffmpeg.exe`.
 
+
+## Download
+https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
+
 ## Features
 
 - Serves a selected video folder and individually selected video files through DLNA.
