@@ -10,6 +10,23 @@ A Windows DLNA server for XR video playback on PICO, Meta Quest, and other compa
 ## Download
 https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
+
+### VR video players supporting the output
+
+For Green-screen MP4, examples of VR players with chroma-key functionality include:
+
+- [R800ZZbrowser for PICO/Meta](https://vr180g.com/browser/browser.php?l=en)
+- [r800zzvrplayer for PICO 4 Ultra/PICO4](https://vr180g.com/pico/vrplayer.php?l=en)
+
+For Alpha Packed (DeoVR alpha video format)
+- [r800zzvrplayer for PICO 4 Ultra/PICO4](https://vr180g.com/pico/vrplayer.php?l=en)
+- DeoVR (Non‑VR videos are not supported.)
+
+For WebM VP9 Alpha, the VR player I have confirmed is:
+
+- **[r800zzvrplayer 0.5 or later](https://vr180g.com/pico/vrplayer.php?l=en)
+**
+
 ## Features
 
 - Serves a selected video folder and individually selected video files through DLNA.
