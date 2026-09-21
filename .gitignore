@@ -1,0 +1,48 @@
+# Downloaded dependencies and generated environment
+/deps/
+/deps_env.bat
+
+# Downloaded/generated RVM models
+/rvm_mobilenetv3_fp16.onnx
+/rvm_mobilenetv3_fp32.onnx
+
+# CMake and compiler output
+/build/
+/build_cuda_ep/
+/build_trt_blackwell/
+/out/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+Makefile
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+
+# Installer output
+/installer/Output/
+/installer/output/
+
+# Runtime-generated files
+imgui.ini
+*.log
+*.conversion.log
+*.r800zz-part
+
+# Visual Studio
+/.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+
+# Operating-system files
+Thumbs.db
+Desktop.ini
+.DS_Store
