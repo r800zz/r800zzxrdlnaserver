@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(r800zz_dlna_server LANGUAGES CXX CUDA)
+project(r800zz_dlna_server LANGUAGES CXX CUDA RC)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,6 +34,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(imgui)
 
 add_executable(r800zz_dlna_server WIN32
+    resources/app.rc
     src/main.cpp
     src/dlna_server.cpp
     src/dlna_server.h
@@ -61,6 +62,7 @@ target_link_libraries(r800zz_dlna_server PRIVATE
 )
 
 add_executable(r800zz_ai_worker
+    resources/app.rc
     src/r800zz_ai_worker.cpp
     src/cpu_converter.cpp
     src/cpu_converter.h
@@ -171,3 +173,4 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rvm_mobilenetv3_fp16.onnx")
             $<TARGET_FILE_DIR:r800zz_ai_worker>/rvm_mobilenetv3_fp16.onnx
     )
 endif()
+
