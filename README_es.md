@@ -1,4 +1,4 @@
-# r800zzXRdlnaServer
+# r800zzXRdlnaServer for Windows+NVIDIA GPU
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
