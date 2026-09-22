@@ -394,6 +394,11 @@ static constexpr const wchar_t* kWebLanguageCodes[] = {
     L"en", L"ru", L"es", L"th", L"cn", L"kr", L"jp"
 };
 
+static constexpr const wchar_t* kGitHubReadmeFiles[] = {
+    L"README.md", L"README_ru.md", L"README_es.md", L"README_th.md",
+    L"README_zh.md", L"README_ko.md", L"README_ja.md"
+};
+
 static std::filesystem::path SettingsFilePath() {
     PWSTR localAppData = nullptr;
     const HRESULT result = SHGetKnownFolderPath(
@@ -756,7 +761,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                    L"R800ZZDlnaServerWindow", nullptr};
     RegisterClassExW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName,
-                              L"r800zzXRdlnaServer 0.1",
+                              L"r800zzXRdlnaServer 0.2",
                               WS_OVERLAPPEDWINDOW, 100, 100, 820, 720,
                               nullptr, nullptr, wc.hInstance, nullptr);
 
@@ -931,18 +936,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
         ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
         ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
-        ImGui::Begin("r800zzXRdlnaServer", nullptr,
+        ImGui::Begin("##r800zzXRdlnaServer", nullptr,
                      ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
 
-        // Place the website links in the ImGui title bar, immediately after
-        // its title.  They are drawn manually so they remain clickable in the
-        // non-content title-bar area.
+        // Draw the title and website links manually so every item remains
+        // clickable in the non-content title-bar area.
         const ImVec2 windowPosition = ImGui::GetWindowPos();
         const float titleTextY = windowPosition.y +
             (ImGui::GetFrameHeight() - ImGui::GetTextLineHeight()) * 0.5f;
-        float titleLinkX = windowPosition.x + ImGui::GetStyle().FramePadding.x +
-            ImGui::CalcTextSize("r800zzXRdlnaServer").x + 18.0f;
+        float titleLinkX = windowPosition.x + ImGui::GetStyle().FramePadding.x;
         const int webLanguage = std::clamp(ui_language, 0, 6);
+        const std::wstring repositoryUrl =
+            std::wstring(L"https://github.com/r800zz/r800zzxrdlnaserver/blob/main/") +
+            kGitHubReadmeFiles[webLanguage];
         const std::wstring vr180gUrl =
             std::wstring(L"https://vr180g.com/?l=") +
             kWebLanguageCodes[webLanguage];
@@ -952,6 +958,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         const std::wstring browserUrl =
             std::wstring(L"https://vr180g.com/browser/browser.php?l=") +
             kWebLanguageCodes[webLanguage];
+        titleLinkX = DrawTitleBarWebLink(
+            "r800zzXRdlnaServer", repositoryUrl.c_str(),
+            ImVec2(titleLinkX, titleTextY)) + 18.0f;
         titleLinkX = DrawTitleBarWebLink(
             "vr180g.com", vr180gUrl.c_str(),
             ImVec2(titleLinkX, titleTextY)) + 18.0f;

@@ -1,4 +1,5 @@
 #include "simple_video_player.h"
+#include "../resources/resource.h"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -18,12 +19,15 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdint>
 #include <cwchar>
 #include <iterator>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -35,6 +39,11 @@ constexpr int kSeekRange = 10000;
 constexpr int kOutputSampleRate = 48000;
 constexpr int kOutputChannels = 2;
 constexpr int64_t kLateVideoDropUs = 40000;
+constexpr size_t kAudioPrebufferBytes =
+    static_cast<size_t>(kOutputSampleRate) * kOutputChannels *
+    sizeof(int16_t) / 2; // 500 ms
+constexpr uint64_t kInvalidAudioGeneration =
+    std::numeric_limits<uint64_t>::max();
 
 enum ControlId {
     kPlayPauseButton = 1001,
@@ -42,6 +51,7 @@ enum ControlId {
     kLeftHalfButton = 1003,
     kSeekBar = 1004,
     kPositionLabel = 1005,
+    kRepeatCheckbox = 1006,
 };
 
 struct PlayerLabels {
@@ -51,17 +61,18 @@ struct PlayerLabels {
     const wchar_t* exitFullscreen;
     const wchar_t* leftHalf;
     const wchar_t* fullWidth;
+    const wchar_t* repeat;
 };
 
 const PlayerLabels& labelsFor(int language) {
     static const PlayerLabels labels[] = {
-        {L"Play", L"Pause", L"Fullscreen", L"Exit Fullscreen", L"Left Half", L"Full Width"},
-        {L"Воспроизвести", L"Пауза", L"На весь экран", L"Выйти из полного экрана", L"Левая половина", L"Полная ширина"},
-        {L"Reproducir", L"Pausa", L"Pantalla completa", L"Salir de pantalla completa", L"Mitad izquierda", L"Ancho completo"},
-        {L"เล่น", L"หยุดชั่วคราว", L"เต็มจอ", L"ออกจากเต็มจอ", L"ครึ่งซ้าย", L"เต็มความกว้าง"},
-        {L"播放", L"暂停", L"全屏", L"退出全屏", L"左半边", L"完整宽度"},
-        {L"재생", L"일시정지", L"전체 화면", L"전체 화면 종료", L"왼쪽 절반", L"전체 너비"},
-        {L"再生", L"一時停止", L"全画面", L"全画面解除", L"左半分", L"全幅表示"},
+        {L"Play", L"Pause", L"Fullscreen", L"Exit Fullscreen", L"Left Half", L"Full Width", L"Repeat"},
+        {L"Воспроизвести", L"Пауза", L"На весь экран", L"Выйти из полного экрана", L"Левая половина", L"Полная ширина", L"Повтор"},
+        {L"Reproducir", L"Pausa", L"Pantalla completa", L"Salir de pantalla completa", L"Mitad izquierda", L"Ancho completo", L"Repetir"},
+        {L"เล่น", L"หยุดชั่วคราว", L"เต็มจอ", L"ออกจากเต็มจอ", L"ครึ่งซ้าย", L"เต็มความกว้าง", L"เล่นซ้ำ"},
+        {L"播放", L"暂停", L"全屏", L"退出全屏", L"左半边", L"完整宽度", L"循环播放"},
+        {L"재생", L"일시정지", L"전체 화면", L"전체 화면 종료", L"왼쪽 절반", L"전체 너비", L"반복"},
+        {L"再生", L"一時停止", L"全画面", L"全画面解除", L"左半分", L"全幅表示", L"リピート"},
     };
     return labels[std::clamp(language, 0, 6)];
 }
@@ -126,6 +137,16 @@ public:
         windowClass.hInstance = instance;
         windowClass.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
         windowClass.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+        const HICON largeIcon = static_cast<HICON>(LoadImageW(
+            instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+            GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON),
+            LR_DEFAULTCOLOR));
+        const HICON smallIcon = static_cast<HICON>(LoadImageW(
+            instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+            LR_DEFAULTCOLOR));
+        windowClass.hIcon = largeIcon;
+        windowClass.hIconSm = smallIcon;
         windowClass.lpszClassName = L"R800ZZSimpleVideoPlayerWindow";
         if (!RegisterClassExW(&windowClass) &&
             GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
@@ -160,6 +181,12 @@ public:
                     std::to_string(GetLastError());
             return false;
         }
+        if (largeIcon)
+            SendMessageW(hwnd_, WM_SETICON, ICON_BIG,
+                         reinterpret_cast<LPARAM>(largeIcon));
+        if (smallIcon)
+            SendMessageW(hwnd_, WM_SETICON, ICON_SMALL,
+                         reinterpret_cast<LPARAM>(smallIcon));
 
         playPauseButton_ = CreateWindowExW(
             0, L"BUTTON", labels_.pause, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -173,6 +200,11 @@ public:
             0, L"BUTTON", labels_.leftHalf, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             0, 0, 120, 30, hwnd_, reinterpret_cast<HMENU>(kLeftHalfButton),
             instance, nullptr);
+        repeatCheckbox_ = CreateWindowExW(
+            0, L"BUTTON", labels_.repeat,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0, 0, 90, 30, hwnd_, reinterpret_cast<HMENU>(kRepeatCheckbox),
+            instance, nullptr);
         seekBar_ = CreateWindowExW(
             0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
             0, 0, 200, 30, hwnd_, reinterpret_cast<HMENU>(kSeekBar),
@@ -183,7 +215,7 @@ public:
             0, 0, 120, 30, hwnd_, reinterpret_cast<HMENU>(kPositionLabel),
             instance, nullptr);
         if (!playPauseButton_ || !fullscreenButton_ || !leftHalfButton_ ||
-            !seekBar_ || !positionLabel_) {
+            !repeatCheckbox_ || !seekBar_ || !positionLabel_) {
             error = "Video Player controls creation failed. Win32=" +
                     std::to_string(GetLastError());
             return false;
@@ -215,6 +247,10 @@ public:
 
     bool paused() const { return paused_; }
     bool seekPending() const { return seekAbsolutePending_ || seekDeltaUs_ != 0; }
+    bool repeatEnabled() const {
+        return repeatCheckbox_ &&
+            SendMessageW(repeatCheckbox_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }
 
     bool consumePlaybackClockReset() {
         const bool pending = playbackClockResetPending_;
@@ -313,12 +349,15 @@ private:
         const int playWidth = 105;
         const int fullWidth = 125;
         const int halfWidth = 125;
+        const int repeatWidth = 90;
         const int positionWidth = 118;
         MoveWindow(playPauseButton_, 8, y, playWidth, height, TRUE);
         MoveWindow(fullscreenButton_, 8 + playWidth + 6, y, fullWidth, height, TRUE);
         MoveWindow(leftHalfButton_, 8 + playWidth + 6 + fullWidth + 6,
                    y, halfWidth, height, TRUE);
-        const int positionX = 8 + playWidth + 6 + fullWidth + 6 + halfWidth + 6;
+        const int repeatX = 8 + playWidth + 6 + fullWidth + 6 + halfWidth + 6;
+        MoveWindow(repeatCheckbox_, repeatX, y, repeatWidth, height, TRUE);
+        const int positionX = repeatX + repeatWidth + 6;
         MoveWindow(positionLabel_, positionX, y, positionWidth, height, TRUE);
         const int seekX = positionX + positionWidth + 6;
         MoveWindow(seekBar_, seekX, y,
@@ -415,6 +454,9 @@ private:
             if (LOWORD(wParam) == kLeftHalfButton) {
                 self->toggleLeftHalf(); SetFocus(hwnd); return 0;
             }
+            if (LOWORD(wParam) == kRepeatCheckbox) {
+                SetFocus(hwnd); return 0;
+            }
             break;
         case WM_HSCROLL:
             if (reinterpret_cast<HWND>(lParam) == self->seekBar_) {
@@ -424,6 +466,24 @@ private:
                     SendMessageW(self->seekBar_, TBM_GETPOS, 0, 0));
                 if (code == TB_THUMBTRACK || code == TB_THUMBPOSITION) {
                     position = static_cast<int>(HIWORD(wParam));
+                } else if (code == TB_PAGEUP || code == TB_PAGEDOWN) {
+                    // A click on the track normally moves only one page. Use
+                    // the actual mouse position so the seek target is exactly
+                    // where the user clicked.
+                    POINT cursor{};
+                    RECT channel{};
+                    if (GetCursorPos(&cursor) &&
+                        ScreenToClient(self->seekBar_, &cursor)) {
+                        SendMessageW(self->seekBar_, TBM_GETCHANNELRECT, 0,
+                                     reinterpret_cast<LPARAM>(&channel));
+                        const int channelWidth =
+                            std::max(1, static_cast<int>(channel.right - channel.left));
+                        position = std::clamp(
+                            MulDiv(cursor.x - channel.left,
+                                   kSeekRange, channelWidth),
+                            0, kSeekRange);
+                        SendMessageW(self->seekBar_, TBM_SETPOS, TRUE, position);
+                    }
                 }
                 switch (code) {
                 case TB_LINEUP:
@@ -550,6 +610,7 @@ private:
     HWND playPauseButton_ = nullptr;
     HWND fullscreenButton_ = nullptr;
     HWND leftHalfButton_ = nullptr;
+    HWND repeatCheckbox_ = nullptr;
     HWND seekBar_ = nullptr;
     HWND positionLabel_ = nullptr;
     int width_ = 0;
@@ -579,6 +640,8 @@ private:
 
 class WaveAudioOutput {
 public:
+    enum class SubmitResult { Submitted, WouldBlock, Failed };
+
     ~WaveAudioOutput() { close(); }
 
     bool open(std::string& error) {
@@ -605,15 +668,12 @@ public:
         return true;
     }
 
-    bool write(const uint8_t* data, size_t bytes, PlayerWindow& window,
-               std::string& error) {
-        if (!handle_ || bytes == 0) return true;
+    SubmitResult submit(const uint8_t* data, size_t bytes,
+                        std::string& error) {
+        if (!handle_ || bytes == 0) return SubmitResult::Submitted;
         Buffer& buffer = buffers_[nextBuffer_];
-        while (buffer.prepared && !(buffer.header.dwFlags & WHDR_DONE)) {
-            if (!window.pump() || window.seekPending()) return true;
-            setPaused(window.paused());
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
+        if (buffer.prepared && !(buffer.header.dwFlags & WHDR_DONE))
+            return SubmitResult::WouldBlock;
         if (buffer.prepared) {
             waveOutUnprepareHeader(handle_, &buffer.header, sizeof(WAVEHDR));
             buffer.prepared = false;
@@ -625,16 +685,16 @@ public:
         MMRESULT result = waveOutPrepareHeader(handle_, &buffer.header, sizeof(WAVEHDR));
         if (result != MMSYSERR_NOERROR) {
             error = "waveOutPrepareHeader failed. MMRESULT=" + std::to_string(result);
-            return false;
+            return SubmitResult::Failed;
         }
         buffer.prepared = true;
         result = waveOutWrite(handle_, &buffer.header, sizeof(WAVEHDR));
         if (result != MMSYSERR_NOERROR) {
             error = "waveOutWrite failed. MMRESULT=" + std::to_string(result);
-            return false;
+            return SubmitResult::Failed;
         }
         nextBuffer_ = (nextBuffer_ + 1) % buffers_.size();
-        return true;
+        return SubmitResult::Submitted;
     }
 
     void setPaused(bool paused) {
@@ -779,6 +839,361 @@ bool openVideoDecoder(
     return openDecoder(format, streamIndex, decoder, error);
 }
 
+class IndependentAudioPlayback {
+public:
+    ~IndependentAudioPlayback() { stop(); }
+
+    bool start(const std::filesystem::path& input, std::string& error) {
+        stopRequested_.store(false, std::memory_order_release);
+        initializationState_.store(0, std::memory_order_release);
+        worker_ = std::thread([this, input]() { run(input); });
+        while (initializationState_.load(std::memory_order_acquire) == 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (initializationState_.load(std::memory_order_acquire) < 0) {
+            if (worker_.joinable()) worker_.join();
+            error = errorText();
+            return false;
+        }
+        return true;
+    }
+
+    void stop() {
+        stopRequested_.store(true, std::memory_order_release);
+        if (worker_.joinable()) worker_.join();
+    }
+
+    void setPaused(bool paused) {
+        pauseRequested_.store(paused, std::memory_order_release);
+    }
+
+    uint64_t requestSeek(int64_t targetUs) {
+        requestedSeekUs_.store(std::max<int64_t>(0, targetUs),
+                               std::memory_order_relaxed);
+        videoReadyGeneration_.store(kInvalidAudioGeneration,
+                                    std::memory_order_release);
+        return requestedGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    }
+
+    uint64_t generation() const {
+        return requestedGeneration_.load(std::memory_order_acquire);
+    }
+
+    bool ready(uint64_t generation) const {
+        return bufferedGeneration_.load(std::memory_order_acquire) == generation;
+    }
+
+    void signalVideoReady(uint64_t generation) {
+        videoReadyGeneration_.store(generation, std::memory_order_release);
+    }
+
+    bool failed(std::string& error) const {
+        if (!runtimeFailed_.load(std::memory_order_acquire)) return false;
+        error = errorText();
+        return true;
+    }
+
+private:
+    enum class DrainResult { Complete, Interrupted, Failed };
+
+    void setError(const std::string& error) {
+        std::lock_guard<std::mutex> lock(errorMutex_);
+        error_ = error;
+    }
+
+    std::string errorText() const {
+        std::lock_guard<std::mutex> lock(errorMutex_);
+        return error_;
+    }
+
+    void run(const std::filesystem::path& input) {
+        AVFormatContext* rawFormat = nullptr;
+        const std::string inputUtf8 = input.u8string();
+        int rc = avformat_open_input(&rawFormat, inputUtf8.c_str(), nullptr, nullptr);
+        if (rc < 0) {
+            setError("Video Player audio input: " + fferr(rc));
+            initializationState_.store(-1, std::memory_order_release);
+            return;
+        }
+        std::unique_ptr<AVFormatContext, FormatCloser> format(rawFormat);
+        rc = avformat_find_stream_info(format.get(), nullptr);
+        if (rc < 0) {
+            setError("Video Player audio stream information: " + fferr(rc));
+            initializationState_.store(-1, std::memory_order_release);
+            return;
+        }
+        const int audioIndex = av_find_best_stream(
+            format.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+        if (audioIndex < 0) {
+            setError("Video Player found no audio stream");
+            initializationState_.store(-1, std::memory_order_release);
+            return;
+        }
+        AVStream* audioStream = format->streams[audioIndex];
+        std::unique_ptr<AVCodecContext, CodecCloser> decoder;
+        std::string localError;
+        if (!openDecoder(format.get(), audioIndex, decoder, localError)) {
+            setError(localError);
+            initializationState_.store(-1, std::memory_order_release);
+            return;
+        }
+
+        AVChannelLayout sourceLayout{};
+        if (decoder->ch_layout.nb_channels > 0)
+            av_channel_layout_copy(&sourceLayout, &decoder->ch_layout);
+        else
+            av_channel_layout_default(&sourceLayout, 2);
+        AVChannelLayout destinationLayout = AV_CHANNEL_LAYOUT_STEREO;
+        SwrContext* rawResampler = nullptr;
+        rc = swr_alloc_set_opts2(
+            &rawResampler, &destinationLayout, AV_SAMPLE_FMT_S16,
+            kOutputSampleRate, &sourceLayout, decoder->sample_fmt,
+            decoder->sample_rate, 0, nullptr);
+        av_channel_layout_uninit(&sourceLayout);
+        if (rc < 0 || !rawResampler) {
+            setError("Video Player audio resampler allocation: " + fferr(rc));
+            initializationState_.store(-1, std::memory_order_release);
+            return;
+        }
+        std::unique_ptr<SwrContext, SwrCloser> resampler(rawResampler);
+        rc = swr_init(resampler.get());
+        if (rc < 0) {
+            setError("Video Player audio resampler initialization: " + fferr(rc));
+            initializationState_.store(-1, std::memory_order_release);
+            return;
+        }
+
+        WaveAudioOutput output;
+        if (!output.open(localError)) {
+            setError(localError);
+            initializationState_.store(-1, std::memory_order_release);
+            return;
+        }
+        output.setPaused(true);
+
+        std::unique_ptr<AVPacket, PacketCloser> packet(av_packet_alloc());
+        std::unique_ptr<AVFrame, FrameCloser> frame(av_frame_alloc());
+        if (!packet || !frame) {
+            setError("Video Player audio packet/frame allocation failed");
+            initializationState_.store(-1, std::memory_order_release);
+            return;
+        }
+
+        const int64_t inputStartUs = format->start_time != AV_NOPTS_VALUE
+            ? format->start_time : 0;
+        uint64_t activeGeneration =
+            requestedGeneration_.load(std::memory_order_acquire);
+        int64_t discardBeforeUs = 0;
+        size_t prebufferedBytes = 0;
+        bool decoderEof = false;
+        std::vector<uint8_t> pcm;
+        initializationState_.store(1, std::memory_order_release);
+
+        auto updateOutputState = [&]() {
+            const bool synchronized =
+                bufferedGeneration_.load(std::memory_order_acquire) ==
+                    activeGeneration &&
+                videoReadyGeneration_.load(std::memory_order_acquire) ==
+                    activeGeneration;
+            output.setPaused(pauseRequested_.load(std::memory_order_acquire) ||
+                             !synchronized);
+        };
+
+        auto submitPcm = [&](const uint8_t* data, size_t bytes) -> DrainResult {
+            for (;;) {
+                if (stopRequested_.load(std::memory_order_acquire))
+                    return DrainResult::Interrupted;
+                if (requestedGeneration_.load(std::memory_order_acquire) !=
+                    activeGeneration)
+                    return DrainResult::Interrupted;
+                updateOutputState();
+                const WaveAudioOutput::SubmitResult result =
+                    output.submit(data, bytes, localError);
+                if (result == WaveAudioOutput::SubmitResult::Failed)
+                    return DrainResult::Failed;
+                if (result == WaveAudioOutput::SubmitResult::Submitted) {
+                    prebufferedBytes += bytes;
+                    if (prebufferedBytes >= kAudioPrebufferBytes) {
+                        bufferedGeneration_.store(activeGeneration,
+                                                  std::memory_order_release);
+                    }
+                    return DrainResult::Complete;
+                }
+                // Some codecs emit very small audio frames. If all waveOut
+                // slots fill before the byte target is reached, the full ring
+                // is already a sufficient prebuffer and must be released.
+                if (prebufferedBytes > 0 &&
+                    bufferedGeneration_.load(std::memory_order_acquire) !=
+                        activeGeneration) {
+                    bufferedGeneration_.store(activeGeneration,
+                                              std::memory_order_release);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        };
+
+        auto drainDecoder = [&]() -> DrainResult {
+            for (;;) {
+                const int receiveResult =
+                    avcodec_receive_frame(decoder.get(), frame.get());
+                if (receiveResult == AVERROR(EAGAIN) ||
+                    receiveResult == AVERROR_EOF)
+                    return DrainResult::Complete;
+                if (receiveResult < 0) {
+                    localError = "Video Player audio decode: " +
+                                 fferr(receiveResult);
+                    return DrainResult::Failed;
+                }
+                int64_t pts = frame->best_effort_timestamp;
+                if (pts == AV_NOPTS_VALUE) pts = frame->pts;
+                const int64_t ptsUs = pts == AV_NOPTS_VALUE
+                    ? discardBeforeUs
+                    : av_rescale_q(pts, audioStream->time_base,
+                                   AV_TIME_BASE_Q) - inputStartUs;
+                if (ptsUs + 50000 >= discardBeforeUs) {
+                    const int inputRate = std::max(1, decoder->sample_rate);
+                    const int outputSamples = static_cast<int>(av_rescale_rnd(
+                        swr_get_delay(resampler.get(), inputRate) +
+                            frame->nb_samples,
+                        kOutputSampleRate, inputRate, AV_ROUND_UP));
+                    pcm.resize(static_cast<size_t>(std::max(0, outputSamples)) *
+                               kOutputChannels * sizeof(int16_t));
+                    uint8_t* outputData[1]{pcm.data()};
+                    const AVSampleFormat inputFormat =
+                        static_cast<AVSampleFormat>(frame->format);
+                    const int inputPlaneCount =
+                        av_sample_fmt_is_planar(inputFormat)
+                            ? std::max(1, frame->ch_layout.nb_channels) : 1;
+                    std::vector<const uint8_t*> inputPlanes(
+                        static_cast<size_t>(inputPlaneCount));
+                    for (size_t i = 0; i < inputPlanes.size(); ++i)
+                        inputPlanes[i] = frame->extended_data[i];
+                    const int converted = swr_convert(
+                        resampler.get(), outputData, outputSamples,
+                        inputPlanes.data(), frame->nb_samples);
+                    if (converted < 0) {
+                        localError = "Video Player audio conversion: " +
+                                     fferr(converted);
+                        av_frame_unref(frame.get());
+                        return DrainResult::Failed;
+                    }
+                    const size_t outputBytes =
+                        static_cast<size_t>(converted) * kOutputChannels *
+                        sizeof(int16_t);
+                    const DrainResult submitResult =
+                        submitPcm(pcm.data(), outputBytes);
+                    if (submitResult != DrainResult::Complete) {
+                        av_frame_unref(frame.get());
+                        return submitResult;
+                    }
+                }
+                av_frame_unref(frame.get());
+            }
+        };
+
+        while (!stopRequested_.load(std::memory_order_acquire)) {
+            const uint64_t requestedGeneration =
+                requestedGeneration_.load(std::memory_order_acquire);
+            if (requestedGeneration != activeGeneration) {
+                activeGeneration = requestedGeneration;
+                const int64_t targetUs =
+                    requestedSeekUs_.load(std::memory_order_relaxed);
+                const int64_t absoluteTargetUs = inputStartUs + targetUs;
+                rc = avformat_seek_file(format.get(), -1, INT64_MIN,
+                                        absoluteTargetUs, INT64_MAX,
+                                        AVSEEK_FLAG_BACKWARD);
+                if (rc < 0)
+                    rc = av_seek_frame(format.get(), -1, absoluteTargetUs,
+                                       AVSEEK_FLAG_BACKWARD);
+                if (rc < 0) {
+                    localError = "Video Player audio seek: " + fferr(rc);
+                    break;
+                }
+                avcodec_flush_buffers(decoder.get());
+                swr_close(resampler.get());
+                rc = swr_init(resampler.get());
+                if (rc < 0) {
+                    localError = "Video Player audio resampler reset: " +
+                                 fferr(rc);
+                    break;
+                }
+                output.reset(true);
+                bufferedGeneration_.store(kInvalidAudioGeneration,
+                                          std::memory_order_release);
+                discardBeforeUs = targetUs;
+                prebufferedBytes = 0;
+                decoderEof = false;
+                av_packet_unref(packet.get());
+                av_frame_unref(frame.get());
+                continue;
+            }
+
+            updateOutputState();
+            if (decoderEof) {
+                if (bufferedGeneration_.load(std::memory_order_acquire) !=
+                    activeGeneration) {
+                    bufferedGeneration_.store(activeGeneration,
+                                              std::memory_order_release);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+
+            rc = av_read_frame(format.get(), packet.get());
+            if (rc == AVERROR_EOF) {
+                avcodec_send_packet(decoder.get(), nullptr);
+                const DrainResult drainResult = drainDecoder();
+                if (drainResult == DrainResult::Failed) break;
+                if (drainResult == DrainResult::Interrupted) continue;
+                decoderEof = true;
+                continue;
+            }
+            if (rc < 0) {
+                localError = "Video Player audio read: " + fferr(rc);
+                break;
+            }
+            if (packet->stream_index != audioIndex) {
+                av_packet_unref(packet.get());
+                continue;
+            }
+            rc = avcodec_send_packet(decoder.get(), packet.get());
+            if (rc == AVERROR(EAGAIN)) {
+                const DrainResult firstDrain = drainDecoder();
+                if (firstDrain == DrainResult::Failed) break;
+                if (firstDrain == DrainResult::Interrupted) {
+                    av_packet_unref(packet.get());
+                    continue;
+                }
+                rc = avcodec_send_packet(decoder.get(), packet.get());
+            }
+            av_packet_unref(packet.get());
+            if (rc < 0) {
+                localError = "Video Player audio decode input: " + fferr(rc);
+                break;
+            }
+            const DrainResult drainResult = drainDecoder();
+            if (drainResult == DrainResult::Failed) break;
+        }
+
+        if (!stopRequested_.load(std::memory_order_acquire) &&
+            !localError.empty()) {
+            setError(localError);
+            runtimeFailed_.store(true, std::memory_order_release);
+        }
+    }
+
+    std::thread worker_;
+    std::atomic<bool> stopRequested_{false};
+    std::atomic<bool> pauseRequested_{false};
+    std::atomic<int> initializationState_{0};
+    std::atomic<bool> runtimeFailed_{false};
+    std::atomic<uint64_t> requestedGeneration_{0};
+    std::atomic<uint64_t> bufferedGeneration_{kInvalidAudioGeneration};
+    std::atomic<uint64_t> videoReadyGeneration_{kInvalidAudioGeneration};
+    std::atomic<int64_t> requestedSeekUs_{0};
+    mutable std::mutex errorMutex_;
+    std::string error_;
+};
+
 } // namespace
 
 bool RunSimpleVideoPlayer(const std::filesystem::path& input,
@@ -796,7 +1211,6 @@ bool RunSimpleVideoPlayer(const std::filesystem::path& input,
     if (videoIndex < 0) { error = "Video Player found no video stream"; return false; }
     const int audioIndex = av_find_best_stream(format.get(), AVMEDIA_TYPE_AUDIO, -1, videoIndex, nullptr, 0);
     AVStream* videoStream = format->streams[videoIndex];
-    AVStream* audioStream = audioIndex >= 0 ? format->streams[audioIndex] : nullptr;
 
     std::unique_ptr<AVCodecContext, CodecCloser> videoDecoder;
     std::unique_ptr<AVBufferRef, BufferRefCloser> cudaDevice;
@@ -807,31 +1221,9 @@ bool RunSimpleVideoPlayer(const std::filesystem::path& input,
         error = "Video Player received invalid video dimensions"; return false;
     }
 
-    std::unique_ptr<AVCodecContext, CodecCloser> audioDecoder;
-    std::unique_ptr<SwrContext, SwrCloser> resampler;
-    WaveAudioOutput audioOutput;
-    if (audioIndex >= 0) {
-        if (!openDecoder(format.get(), audioIndex, audioDecoder, error)) return false;
-        AVChannelLayout sourceLayout{};
-        if (audioDecoder->ch_layout.nb_channels > 0)
-            av_channel_layout_copy(&sourceLayout, &audioDecoder->ch_layout);
-        else
-            av_channel_layout_default(&sourceLayout, 2);
-        AVChannelLayout destinationLayout = AV_CHANNEL_LAYOUT_STEREO;
-        SwrContext* rawResampler = nullptr;
-        rc = swr_alloc_set_opts2(&rawResampler, &destinationLayout, AV_SAMPLE_FMT_S16,
-            kOutputSampleRate, &sourceLayout, audioDecoder->sample_fmt,
-            audioDecoder->sample_rate, 0, nullptr);
-        av_channel_layout_uninit(&sourceLayout);
-        if (rc < 0 || !rawResampler) {
-            error = "Video Player audio resampler allocation: " + fferr(rc); return false;
-        }
-        resampler.reset(rawResampler);
-        rc = swr_init(resampler.get());
-        if (rc < 0) { error = "Video Player audio resampler initialization: " + fferr(rc); return false; }
-        if (!audioOutput.open(error)) return false;
-        audioOutput.setPaused(true);
-    }
+    IndependentAudioPlayback audioPlayback;
+    if (audioIndex >= 0 && !audioPlayback.start(input, error)) return false;
+    uint64_t audioGeneration = audioPlayback.generation();
 
     const int64_t durationUs = format->duration != AV_NOPTS_VALUE
         ? std::max<int64_t>(0, format->duration) : 0;
@@ -843,8 +1235,7 @@ bool RunSimpleVideoPlayer(const std::filesystem::path& input,
     std::unique_ptr<AVPacket, PacketCloser> packet(av_packet_alloc());
     std::unique_ptr<AVFrame, FrameCloser> videoFrame(av_frame_alloc());
     std::unique_ptr<AVFrame, FrameCloser> softwareVideoFrame(av_frame_alloc());
-    std::unique_ptr<AVFrame, FrameCloser> audioFrame(av_frame_alloc());
-    if (!packet || !videoFrame || !softwareVideoFrame || !audioFrame) {
+    if (!packet || !videoFrame || !softwareVideoFrame) {
         error = "Video Player frame allocation failed"; return false;
     }
 
@@ -855,50 +1246,40 @@ bool RunSimpleVideoPlayer(const std::filesystem::path& input,
     auto anchorWall = std::chrono::steady_clock::now();
     bool resetClock = true;
     bool eof = false;
-    bool audioStarted = audioIndex < 0;
-    std::vector<uint8_t> audioPcm;
+    bool videoDecoderDrained = false;
     auto cleanupScaler = [&]() { if (scaler) sws_freeContext(scaler); scaler = nullptr; };
-
-    auto writeAudioFrame = [&](AVFrame* frame) -> bool {
-        const int inputRate = std::max(1, audioDecoder->sample_rate);
-        const int outputSamples = static_cast<int>(av_rescale_rnd(
-            swr_get_delay(resampler.get(), inputRate) + frame->nb_samples,
-            kOutputSampleRate, inputRate, AV_ROUND_UP));
-        audioPcm.resize(static_cast<size_t>(std::max(0, outputSamples)) *
-                        kOutputChannels * sizeof(int16_t));
-        uint8_t* outputData[1]{audioPcm.data()};
-        const AVSampleFormat inputFormat = static_cast<AVSampleFormat>(frame->format);
-        const int inputPlaneCount = av_sample_fmt_is_planar(inputFormat)
-            ? std::max(1, frame->ch_layout.nb_channels) : 1;
-        std::vector<const uint8_t*> inputPlanes(
-            static_cast<size_t>(inputPlaneCount));
-        for (size_t i = 0; i < inputPlanes.size(); ++i) {
-            inputPlanes[i] = frame->extended_data[i];
+    auto seekPlayback = [&](int64_t targetUs) {
+        targetUs = durationUs > 0
+            ? std::clamp<int64_t>(targetUs, 0, durationUs)
+            : std::max<int64_t>(0, targetUs);
+        const int64_t absoluteTargetUs = inputStartUs + targetUs;
+        int seekResult = avformat_seek_file(format.get(), -1, INT64_MIN,
+                                            absoluteTargetUs, INT64_MAX,
+                                            AVSEEK_FLAG_BACKWARD);
+        if (seekResult < 0) {
+            seekResult = av_seek_frame(format.get(), -1, absoluteTargetUs,
+                                       AVSEEK_FLAG_BACKWARD);
         }
-        const int converted = swr_convert(resampler.get(), outputData, outputSamples,
-            inputPlanes.data(), frame->nb_samples);
-        if (converted < 0) { error = "Video Player audio conversion: " + fferr(converted); return false; }
-        const size_t outputBytes = static_cast<size_t>(converted) *
-            kOutputChannels * sizeof(int16_t);
-        return audioOutput.write(audioPcm.data(), outputBytes, window, error);
-    };
-
-    auto drainAudio = [&]() -> bool {
-        for (;;) {
-            const int result = avcodec_receive_frame(audioDecoder.get(), audioFrame.get());
-            if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) return true;
-            if (result < 0) { error = "Video Player audio decode: " + fferr(result); return false; }
-            int64_t pts = audioFrame->best_effort_timestamp;
-            if (pts == AV_NOPTS_VALUE) pts = audioFrame->pts;
-            const int64_t ptsUs = pts == AV_NOPTS_VALUE ? currentUs :
-                av_rescale_q(pts, audioStream->time_base, AV_TIME_BASE_Q) - inputStartUs;
-            if (ptsUs + 50000 >= discardBeforeUs && !writeAudioFrame(audioFrame.get())) return false;
-            av_frame_unref(audioFrame.get());
-            if (window.seekPending()) return true;
-        }
+        if (seekResult < 0) return false;
+        avcodec_flush_buffers(videoDecoder.get());
+        if (audioIndex >= 0)
+            audioGeneration = audioPlayback.requestSeek(targetUs);
+        currentUs = targetUs;
+        discardBeforeUs = targetUs;
+        anchorPtsUs = AV_NOPTS_VALUE;
+        resetClock = true;
+        eof = false;
+        videoDecoderDrained = false;
+        window.setPosition(currentUs);
+        return true;
     };
 
     while (window.pump()) {
+        audioPlayback.setPaused(window.paused());
+        if (audioIndex >= 0 && audioPlayback.failed(error)) {
+            cleanupScaler();
+            return false;
+        }
         if (window.consumePlaybackClockReset()) {
             // A resize/fullscreen transition pauses this single-threaded
             // decode loop inside Win32's modal sizing loop.  Re-anchor on the
@@ -906,45 +1287,26 @@ bool RunSimpleVideoPlayer(const std::filesystem::path& input,
             // wall-clock time that elapsed while the user resized the window.
             resetClock = true;
         }
-        audioOutput.setPaused(!audioStarted || window.paused());
         int64_t seekTargetUs = 0;
         if (window.consumeSeekRequest(currentUs, seekTargetUs)) {
-            seekTargetUs = durationUs > 0
-                ? std::clamp<int64_t>(seekTargetUs, 0, durationUs)
-                : std::max<int64_t>(0, seekTargetUs);
-            const int64_t absoluteTargetUs = inputStartUs + seekTargetUs;
-            rc = avformat_seek_file(format.get(), -1, INT64_MIN,
-                                    absoluteTargetUs, INT64_MAX,
-                                    AVSEEK_FLAG_BACKWARD);
-            if (rc < 0) {
-                rc = av_seek_frame(format.get(), -1, absoluteTargetUs,
-                                   AVSEEK_FLAG_BACKWARD);
-            }
-            if (rc >= 0) {
-                avcodec_flush_buffers(videoDecoder.get());
-                if (audioDecoder) avcodec_flush_buffers(audioDecoder.get());
-                if (resampler) { swr_close(resampler.get()); swr_init(resampler.get()); }
-                audioOutput.reset(true);
-                currentUs = seekTargetUs;
-                discardBeforeUs = seekTargetUs;
-                anchorPtsUs = AV_NOPTS_VALUE;
-                resetClock = true;
-                audioStarted = audioIndex < 0;
-                eof = false;
-                window.setPosition(currentUs);
-            }
+            seekPlayback(seekTargetUs);
         }
         if (window.paused()) {
             resetClock = true;
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
-        if (eof) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
+        if (eof) {
+            if (!videoDecoderDrained || !window.repeatEnabled() ||
+                !seekPlayback(0)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            continue;
+        }
 
         rc = av_read_frame(format.get(), packet.get());
         if (rc == AVERROR_EOF) {
             avcodec_send_packet(videoDecoder.get(), nullptr);
-            if (audioDecoder) avcodec_send_packet(audioDecoder.get(), nullptr);
             eof = true;
         } else if (rc < 0) {
             cleanupScaler(); error = "Video Player read error: " + fferr(rc); return false;
@@ -954,14 +1316,6 @@ bool RunSimpleVideoPlayer(const std::filesystem::path& input,
             if (rc < 0 && rc != AVERROR(EAGAIN)) {
                 cleanupScaler(); error = "Video Player video decode input: " + fferr(rc); return false;
             }
-        } else if (audioDecoder && packet->stream_index == audioIndex) {
-            rc = avcodec_send_packet(audioDecoder.get(), packet.get());
-            av_packet_unref(packet.get());
-            if (rc < 0 && rc != AVERROR(EAGAIN)) {
-                cleanupScaler(); error = "Video Player audio decode input: " + fferr(rc); return false;
-            }
-            if (!drainAudio()) { cleanupScaler(); return false; }
-            continue;
         } else {
             av_packet_unref(packet.get());
             continue;
@@ -969,7 +1323,11 @@ bool RunSimpleVideoPlayer(const std::filesystem::path& input,
 
         for (;;) {
             rc = avcodec_receive_frame(videoDecoder.get(), videoFrame.get());
-            if (rc == AVERROR(EAGAIN) || rc == AVERROR_EOF) break;
+            if (rc == AVERROR(EAGAIN)) break;
+            if (rc == AVERROR_EOF) {
+                videoDecoderDrained = true;
+                break;
+            }
             if (rc < 0) { cleanupScaler(); error = "Video Player video decode output: " + fferr(rc); return false; }
             int64_t pts = videoFrame->best_effort_timestamp;
             if (pts == AV_NOPTS_VALUE) pts = videoFrame->pts;
@@ -982,6 +1340,24 @@ bool RunSimpleVideoPlayer(const std::filesystem::path& input,
             discardBeforeUs = 0;
             if (window.consumePlaybackClockReset()) resetClock = true;
             if (resetClock || anchorPtsUs == AV_NOPTS_VALUE) {
+                while (audioIndex >= 0 &&
+                       !audioPlayback.ready(audioGeneration) &&
+                       window.pump() && !window.paused() &&
+                       !window.seekPending()) {
+                    audioPlayback.setPaused(false);
+                    if (audioPlayback.failed(error)) {
+                        cleanupScaler();
+                        return false;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                }
+                if (window.paused() || window.seekPending()) {
+                    resetClock = true;
+                    av_frame_unref(videoFrame.get());
+                    break;
+                }
+                if (audioIndex >= 0)
+                    audioPlayback.signalVideoReady(audioGeneration);
                 anchorPtsUs = ptsUs;
                 anchorWall = std::chrono::steady_clock::now();
                 resetClock = false;
@@ -991,8 +1367,8 @@ bool RunSimpleVideoPlayer(const std::filesystem::path& input,
             const auto beforeWait = std::chrono::steady_clock::now();
             if (beforeWait > target + std::chrono::microseconds(kLateVideoDropUs)) {
                 // Do not spend another full color-conversion interval on a
-                // frame that is already visibly late. Catching up also lets
-                // the demux loop replenish the asynchronous audio queue.
+                // frame that is already visibly late. Audio decoding and
+                // waveOut submission continue on their independent thread.
                 currentUs = std::max<int64_t>(0, ptsUs);
                 window.setPosition(currentUs);
                 av_frame_unref(videoFrame.get());
@@ -1048,11 +1424,10 @@ bool RunSimpleVideoPlayer(const std::filesystem::path& input,
             currentUs = std::max<int64_t>(0, ptsUs);
             window.setPosition(currentUs);
             window.present();
-            if (!audioStarted) { audioStarted = true; audioOutput.setPaused(false); }
             av_frame_unref(videoFrame.get());
         }
-        if (eof && audioDecoder && !drainAudio()) { cleanupScaler(); return false; }
     }
     cleanupScaler();
     return true;
 }
+
