@@ -12,6 +12,9 @@
 
 https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
+<a href="./jpeg/server_th.jpeg" target="_blank">
+  <img src="./jpeg/server_th.jpeg\" alt=\"r800zzXRdlnaServer for Windows+NVIDIAGPU" width="402" height="356" border="2"></a>
+
 ### โปรแกรมเล่นวิดีโอ VR ที่รองรับเอาต์พุต
 
 สำหรับ MP4 พื้นหลังสีเขียว ตัวอย่างโปรแกรมเล่น VR ที่มีฟังก์ชันโครมาคีย์ ได้แก่:
