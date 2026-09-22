@@ -12,6 +12,9 @@ PICO、Meta Quest、その他の対応デバイスでのXR動画再生に対応�
 
 https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
+<a href="./jpeg/server_ja.jpeg" target="_blank">
+  <img src="./jpeg/server_ja.jpeg\" alt=\"r800zzXRdlnaServer for Windows+NVIDIAGPU" width="402" height="356" border="2"></a>
+
 ### 出力に対応するVR動画プレイヤー
 
 グリーンバックMP4について、クロマキー機能を備えたVRプレイヤーの例：
