@@ -1,5 +1,5 @@
 #define MyAppName "r800zzXRdlnaServer"
-#define MyAppVersion "0.1"
+#define MyAppVersion "0.2"
 #define MyAppPublisher "R800ZZ"
 #define MyAppURL "https://vr180g.com/"
 #define MyAppExeName "r800zz_dlna_server.exe"
