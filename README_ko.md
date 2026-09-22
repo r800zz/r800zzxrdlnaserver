@@ -12,6 +12,9 @@ PICO, Meta Quest 및 기타 호환 장치에서 XR 비디오를 재생하기 위
 
 https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
+<a href="./jpeg/server_ko.jpeg" target="_blank">
+  <img src="./jpeg/server_ko.jpeg\" alt=\"r800zzXRdlnaServer for Windows+NVIDIAGPU" width="402" height="356" border="2"></a>
+
 ### 출력 형식을 지원하는 VR 비디오 플레이어
 
 그린 스크린 MP4의 경우 크로마 키 기능을 제공하는 VR 플레이어의 예는 다음과 같습니다.
