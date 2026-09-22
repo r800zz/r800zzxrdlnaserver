@@ -12,6 +12,9 @@ A Windows DLNA server for XR video playback on PICO, Meta Quest, and other compa
 ## Download
 https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
+<a href="./jpeg/server_en.jpeg" target="_blank">
+  <img src="./jpeg/server_en.jpeg\" alt=\"r800zzXRdlnaServer for Windows+NVIDIAGPU" width="402" height="356" border="2"></a>
+
 
 ### VR video players supporting the output
 
