@@ -12,6 +12,9 @@ DLNA-сервер для Windows, предназначенный для восп
 
 https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
+<a href="./jpeg/server_ru.jpeg" target="_blank">
+  <img src="./jpeg/server_ru.jpeg\" alt=\"r800zzXRdlnaServer for Windows+NVIDIAGPU" width="402" height="356" border="2"></a>
+
 ### VR-видеоплееры, поддерживающие выходные форматы
 
 Для MP4 с зелёным фоном примерами VR-плееров с функцией хромакея являются:
