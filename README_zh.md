@@ -12,6 +12,9 @@
 
 https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
+<a href="./jpeg/server_zh.jpeg" target="_blank">
+  <img src="./jpeg/server_zh.jpeg\" alt=\"r800zzXRdlnaServer for Windows+NVIDIAGPU" width="402" height="356" border="2"></a>
+
 ### 支持输出格式的 VR 视频播放器
 
 对于绿幕 MP4，具备色键功能的 VR 播放器示例包括：
