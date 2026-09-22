@@ -12,6 +12,9 @@ Un servidor DLNA para Windows destinado a la reproducción de vídeo XR en PICO,
 
 https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
+<a href="./jpeg/server_es.jpeg" target="_blank">
+  <img src="./jpeg/server_es.jpeg\" alt=\"r800zzXRdlnaServer for Windows+NVIDIAGPU" width="402" height="356" border="2"></a>
+
 ### Reproductores de vídeo VR compatibles con la salida
 
 Para MP4 con pantalla verde, algunos ejemplos de reproductores VR con función de croma son:
