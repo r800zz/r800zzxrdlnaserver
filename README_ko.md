@@ -20,11 +20,11 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 그린 스크린 MP4의 경우 크로마 키 기능을 제공하는 VR 플레이어의 예는 다음과 같습니다.
 
 - [PICO/Meta용 R800ZZbrowser](https://vr180g.com/browser/browser.php?l=en)
-- [PICO 4 Ultra/PICO4용 r800zzvrplayer](https://vr180g.com/pico/vrplayer.php?l=en)
+- [PICO/Meta용 r800zzvrplayer](https://vr180g.com/pico/vrplayer.php?l=en)
 
 Alpha Packed(DeoVR 알파 비디오 형식)의 경우:
 
-- [PICO 4 Ultra/PICO4용 r800zzvrplayer](https://vr180g.com/pico/vrplayer.php?l=en)
+- [PICO/Meta용 r800zzvrplayer](https://vr180g.com/pico/vrplayer.php?l=en)
 - DeoVR(비VR 비디오는 지원되지 않습니다.)
 
 WebM VP9 Alpha에서 동작을 확인한 VR 플레이어:
