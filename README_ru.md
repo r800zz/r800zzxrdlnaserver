@@ -20,11 +20,11 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 Для MP4 с зелёным фоном примерами VR-плееров с функцией хромакея являются:
 
 - [R800ZZbrowser для PICO/Meta](https://vr180g.com/browser/browser.php?l=en)
-- [r800zzvrplayer для PICO 4 Ultra/PICO4](https://vr180g.com/pico/vrplayer.php?l=en)
+- [r800zzvrplayer для PICO/Meta](https://vr180g.com/pico/vrplayer.php?l=en)
 
 Для Alpha Packed (формат альфа-видео DeoVR):
 
-- [r800zzvrplayer для PICO 4 Ultra/PICO4](https://vr180g.com/pico/vrplayer.php?l=en)
+- [r800zzvrplayer для PICO/Meta](https://vr180g.com/pico/vrplayer.php?l=en)
 - DeoVR (Видео не в формате VR не поддерживаются.)
 
 Для WebM VP9 Alpha подтверждён следующий VR-плеер:
