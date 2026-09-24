@@ -20,7 +20,7 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 グリーンバックMP4について、クロマキー機能を備えたVRプレイヤーの例：
 
 - [PICO/Meta用R800ZZbrowser](https://vr180g.com/browser/browser.php?l=en)
-- [PICO/Meta](https://vr180g.com/pico/vrplayer.php?l=en)
+- [PICO/Meta用r800zzvrplayer](https://vr180g.com/pico/vrplayer.php?l=en)
 
 Alpha Packed（DeoVRアルファ動画形式）：
 
