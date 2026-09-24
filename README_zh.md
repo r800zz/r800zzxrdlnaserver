@@ -20,11 +20,11 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 对于绿幕 MP4，具备色键功能的 VR 播放器示例包括：
 
 - [适用于 PICO/Meta 的 R800ZZbrowser](https://vr180g.com/browser/browser.php?l=en)
-- [适用于 PICO 4 Ultra/PICO4 的 r800zzvrplayer](https://vr180g.com/pico/vrplayer.php?l=en)
+- [适用于 PICO/Meta 的 r800zzvrplayer](https://vr180g.com/pico/vrplayer.php?l=en)
 
 对于 Alpha Packed（DeoVR Alpha 视频格式）：
 
-- [适用于 PICO 4 Ultra/PICO4 的 r800zzvrplayer](https://vr180g.com/pico/vrplayer.php?l=en)
+- [适用于 PICO/Meta 的 r800zzvrplayer](https://vr180g.com/pico/vrplayer.php?l=en)
 - DeoVR（不支持非 VR 视频。）
 
 对于 WebM VP9 Alpha，我已确认可用的 VR 播放器是：
