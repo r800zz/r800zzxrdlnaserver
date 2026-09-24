@@ -20,11 +20,11 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 สำหรับ MP4 พื้นหลังสีเขียว ตัวอย่างโปรแกรมเล่น VR ที่มีฟังก์ชันโครมาคีย์ ได้แก่:
 
 - [R800ZZbrowser สำหรับ PICO/Meta](https://vr180g.com/browser/browser.php?l=en)
-- [r800zzvrplayer สำหรับ PICO 4 Ultra/PICO4](https://vr180g.com/pico/vrplayer.php?l=en)
+- [r800zzvrplayer สำหรับ PICO/Meta](https://vr180g.com/pico/vrplayer.php?l=en)
 
 สำหรับ Alpha Packed (รูปแบบวิดีโออัลฟาของ DeoVR):
 
-- [r800zzvrplayer สำหรับ PICO 4 Ultra/PICO4](https://vr180g.com/pico/vrplayer.php?l=en)
+- [r800zzvrplayer สำหรับ PICO/Meta](https://vr180g.com/pico/vrplayer.php?l=en)
 - DeoVR (ไม่รองรับวิดีโอที่ไม่ใช่ VR)
 
 สำหรับ WebM VP9 Alpha โปรแกรมเล่น VR ที่ยืนยันแล้วคือ:
