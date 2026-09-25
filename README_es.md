@@ -19,17 +19,17 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
 Para MP4 con pantalla verde, algunos ejemplos de reproductores VR con función de croma son:
 
-- [R800ZZbrowser para PICO/Meta](https://vr180g.com/browser/browser.php?l=en)
-- [r800zzvrplayer para PICO/Meta](https://vr180g.com/pico/vrplayer.php?l=en)
+- [R800ZZbrowser para PICO/Meta](https://vr180g.com/browser/browser.php?l=es)
+- [r800zzvrplayer para PICO/Meta](https://vr180g.com/pico/vrplayer.php?l=es)
 
 Para Alpha Packed (formato de vídeo alfa de DeoVR):
 
-- [r800zzvrplayer para PICO/Meta](https://vr180g.com/pico/vrplayer.php?l=en)
+- [r800zzvrplayer para PICO/Meta](https://vr180g.com/pico/vrplayer.php?l=es)
 - DeoVR (No admite vídeos que no sean VR.)
 
 Para WebM VP9 Alpha, el reproductor VR que he confirmado es:
 
-- **[r800zzvrplayer 0.6 o posterior](https://vr180g.com/pico/vrplayer.php?l=en)**
+- **[r800zzvrplayer 0.6 o posterior](https://vr180g.com/pico/vrplayer.php?l=es)**
 
 ## Funciones
 
