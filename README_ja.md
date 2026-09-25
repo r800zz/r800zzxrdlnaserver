@@ -19,17 +19,17 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
 グリーンバックMP4について、クロマキー機能を備えたVRプレイヤーの例：
 
-- [PICO/Meta用R800ZZbrowser](https://vr180g.com/browser/browser.php?l=en)
-- [PICO/Meta用r800zzvrplayer](https://vr180g.com/pico/vrplayer.php?l=en)
+- [PICO/Meta用R800ZZbrowser](https://vr180g.com/browser/browser.php?l=jp)
+- [PICO/Meta用r800zzvrplayer](https://vr180g.com/pico/vrplayer.php?l=jp)
 
 Alpha Packed（DeoVRアルファ動画形式）：
 
-- [PICO/Meta用r800zzvrplayer](https://vr180g.com/pico/vrplayer.php?l=en)
+- [PICO/Meta用r800zzvrplayer](https://vr180g.com/pico/vrplayer.php?l=jp)
 - DeoVR（非VR動画には対応していません。）
 
 WebM VP9 Alphaについて、動作を確認したVRプレイヤー：
 
-- **[r800zzvrplayer 0.6以降](https://vr180g.com/pico/vrplayer.php?l=en)**
+- **[r800zzvrplayer 0.6以降](https://vr180g.com/pico/vrplayer.php?l=jp)**
 
 ## 機能
 
