@@ -2,6 +2,9 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+## Ver 0.4 : 修复了即使是 NVIDIA GPU 也仅支持部分型号的问题。
+## Ver 0.4 : 通过 DirectML 增加了对非 NVIDIA GPU 的支持。
+
 一款用于在 PICO、Meta Quest 及其他兼容设备上播放 XR 视频的 Windows DLNA 服务器，支持实时 AI 背景移除（RVM）、Alpha／色键输出和视频转换。
 
 **实时 AI Passthrough 需要高性能 GPU。**
