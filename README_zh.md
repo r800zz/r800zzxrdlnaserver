@@ -199,8 +199,6 @@ FFmpeg 通过以下 C 库和共享 DLL 使用：
 
 ## 已知限制
 
-- 实时 AI 处理管线目前需要 NVIDIA GPU。
-- 尚未实现 AMD 和 Intel GPU 加速。
 - WebM VP9 Alpha 编码会占用大量 CPU，可能无法维持源视频帧率。
 - 不同 DLNA/XR 播放器对 Alpha 和色键的支持情况不同。
 - 应用程序目前仅面向 Windows x64。
