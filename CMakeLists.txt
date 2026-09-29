@@ -87,7 +87,7 @@ add_executable(r800zz_ai_worker
 
 set_target_properties(r800zz_ai_worker PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
-    CUDA_ARCHITECTURES native
+    CUDA_ARCHITECTURES all-major
 )
 
 target_include_directories(r800zz_ai_worker PRIVATE
@@ -199,4 +199,5 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rvm_mobilenetv3_fp16.onnx")
             $<TARGET_FILE_DIR:r800zz_ai_worker>/rvm_mobilenetv3_fp16.onnx
     )
 endif()
+
 
