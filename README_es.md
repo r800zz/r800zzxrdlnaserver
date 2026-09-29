@@ -4,7 +4,7 @@
 
 Un servidor DLNA para Windows destinado a la reproducción de vídeo XR en PICO, Meta Quest y otros dispositivos compatibles, con eliminación de fondo mediante IA en tiempo real (RVM), salida alfa/croma y conversión de vídeo.
 
-**Se requiere una GPU NVIDIA para el passthrough de IA en tiempo real.**
+**Se requiere una GPU rápida para AI Passthrough en tiempo real.**
 
 `r800zzXRdlnaServer` es una aplicación nativa de C++. Usa directamente las bibliotecas FFmpeg y no ejecuta Python ni `ffmpeg.exe`.
 
