@@ -20,6 +20,12 @@ enum class AiOutputMode {
     ChromaKeyHevc = 2,
 };
 
+enum class AiBackend {
+    NvidiaCuda = 0,
+    DirectML = 1,
+    Cpu = 2,
+};
+
 struct AiCapabilityResult {
     bool available{false};
     std::string message;
@@ -41,11 +47,15 @@ public:
 
     bool Start(const std::vector<std::filesystem::path>& media_files,
                const std::string& advertised_ip,
-               bool ai_passthrough, AiOutputMode ai_output_mode);
+               bool ai_passthrough, AiOutputMode ai_output_mode,
+               AiBackend ai_backend = AiBackend::NvidiaCuda,
+               int directml_device = 0);
     void Stop();
 
-    // AI worker lifetime follows the selected streaming mode, not an HTTP request.
-    bool SetAiPrewarm(bool enabled, const std::filesystem::path& media_file);
+    // AI worker lifetime follows the selected AI Passthrough mode, not an HTTP request.
+    // Backend/device are supplied here because prewarm can start before DLNA Server Start().
+    bool SetAiPrewarm(bool enabled, const std::filesystem::path& media_file,
+                      AiBackend ai_backend, int directml_device);
     bool IsAiPrewarmReady() const;
 
     bool IsRunning() const { return running_.load(); }
@@ -72,8 +82,14 @@ private:
         int height{0};
     };
 
+    // Common DLNA/HTTP/pipe streaming path. CUDA/DirectML/CPU differ only in
+    // worker/model/backend selection; the response and transport behavior is shared.
     void HandleAiPassthroughStream(SOCKET client, const std::string& method,
                                    const std::string& request, const MediaItem& item);
+
+    // Compatibility wrapper; forwards to HandleAiPassthroughStream().
+    void HandleDirectMlPassthroughStream(SOCKET client, const std::string& method,
+                                         const std::string& request, const MediaItem& item);
 
     void SendSsdpResponse(const sockaddr_in& destination, const std::string& st);
     void SendAliveNotifications();
@@ -112,6 +128,8 @@ private:
     std::string uuid_;
     bool ai_passthrough_{false};
     AiOutputMode ai_output_mode_{AiOutputMode::AlphaPackedHevc};
+    AiBackend ai_backend_{AiBackend::NvidiaCuda};
+    int directml_device_{0};
 
     std::atomic<bool> running_{false};
     SOCKET http_listen_socket_{INVALID_SOCKET};
@@ -132,3 +150,4 @@ private:
     std::string status_;
     std::vector<std::string> logs_;
 };
+

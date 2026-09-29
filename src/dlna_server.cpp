@@ -10,10 +10,12 @@
 #include <fstream>
 #include <iomanip>
 #include <iterator>
+#include <limits>
 #include <cwctype>
 #include <set>
 #include <sstream>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <windows.h>
@@ -55,6 +57,66 @@ constexpr const char* kMulticastAddress = "239.255.255.250";
 constexpr uint16_t kSsdpPort = 1900;
 constexpr uint16_t kFirstHttpPort = 49152;
 constexpr uint16_t kLastHttpPort = 49172;
+
+// Must match the realtime MPEG-TS muxrate configured in r800zz_ai_worker.
+// Generic clients use this finite byte space; r800zzvrplayer does not.
+constexpr uint64_t kRealtimeTsMuxRateBitsPerSecond = 100000000ULL;
+constexpr uint64_t kMpegTsPacketSize = 188ULL;
+// ExoPlayer/Media3 MPEG-TS duration probing reads the last 600 TS packets.
+// Treat that request shape as a duration probe rather than a playback seek.
+constexpr uint64_t kTsDurationProbeBytes = 600ULL * kMpegTsPacketSize;
+constexpr int64_t kTsDurationProbeLeadMs = 1000;
+constexpr size_t kGenericTailProbeCacheMaxEntries = 16;
+
+std::mutex g_generic_tail_probe_cache_mutex;
+std::unordered_map<std::string, std::vector<char>> g_generic_tail_probe_cache;
+
+bool LoadGenericTailProbeCache(const std::string& key,
+                               uint64_t expectedBytes,
+                               std::vector<char>& body) {
+    if (key.empty() || expectedBytes == 0 ||
+        expectedBytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_generic_tail_probe_cache_mutex);
+    const auto it = g_generic_tail_probe_cache.find(key);
+    if (it == g_generic_tail_probe_cache.end() ||
+        it->second.size() != static_cast<size_t>(expectedBytes)) {
+        return false;
+    }
+    body = it->second;
+    return true;
+}
+
+void StoreGenericTailProbeCache(const std::string& key,
+                                const std::vector<char>& body) {
+    if (key.empty() || body.empty()) return;
+    std::lock_guard<std::mutex> lock(g_generic_tail_probe_cache_mutex);
+    if (g_generic_tail_probe_cache.find(key) == g_generic_tail_probe_cache.end() &&
+        g_generic_tail_probe_cache.size() >= kGenericTailProbeCacheMaxEntries) {
+        g_generic_tail_probe_cache.erase(g_generic_tail_probe_cache.begin());
+    }
+    g_generic_tail_probe_cache[key] = body;
+}
+
+uint64_t RealtimeTsVirtualSizeBytes(int64_t durationMs) {
+    if (durationMs <= 0) return 0;
+    const long double bytes =
+        static_cast<long double>(durationMs) *
+        static_cast<long double>(kRealtimeTsMuxRateBitsPerSecond) / 8000.0L;
+    if (!std::isfinite(static_cast<double>(bytes)) || bytes <= 0.0L ||
+        bytes > static_cast<long double>(std::numeric_limits<uint64_t>::max())) {
+        return 0;
+    }
+
+    const uint64_t rounded = static_cast<uint64_t>(std::ceil(bytes));
+    const uint64_t remainder = rounded % kMpegTsPacketSize;
+    if (remainder == 0) return rounded;
+
+    const uint64_t add = kMpegTsPacketSize - remainder;
+    if (rounded > std::numeric_limits<uint64_t>::max() - add) return 0;
+    return rounded + add;
+}
 
 std::string ToLower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -164,6 +226,12 @@ std::string AiOutputModeArgument(AiOutputMode mode) {
     return "alpha-packed";
 }
 
+std::string AiBackendArgument(AiBackend backend) {
+    if (backend == AiBackend::DirectML) return "dml";
+    if (backend == AiBackend::Cpu) return "cpu";
+    return "cuda";
+}
+
 std::string MakeUuid() {
     GUID guid{};
     if (FAILED(CoCreateGuid(&guid))) {
@@ -193,20 +261,64 @@ std::string HeaderValue(const std::string& request, const std::string& header_na
     return {};
 }
 
+// Request-local compatibility profile. Each HTTP connection is handled by its
+// own worker thread, so simultaneous r800zzvrplayer and generic DLNA clients do
+// not change each other's advertised seek capabilities.
+thread_local bool g_r800zz_vrplayer_request = false;
+
+bool IsR800zzVrPlayerRequest(const std::string& request) {
+    const std::string userAgent = ToLower(HeaderValue(request, "user-agent"));
+    return userAgent.find("r800zzvrplayer") != std::string::npos;
+}
+
 int64_t ParseDlnaTimeSeekStartMs(const std::string& value) {
     if (value.empty()) return -1;
     const std::string lower = ToLower(value);
     const size_t npt = lower.find("npt=");
     if (npt == std::string::npos) return -1;
-    size_t start = npt + 4;
-    size_t end = value.find('-', start);
+    const size_t start = npt + 4;
+    const size_t end = value.find('-', start);
     if (end == std::string::npos || end <= start) return -1;
     const std::string token = Trim(value.substr(start, end - start));
     if (token.empty() || ToLower(token) == "now") return -1;
-    char* parseEnd = nullptr;
-    errno = 0;
-    const double seconds = std::strtod(token.c_str(), &parseEnd);
-    if (errno != 0 || parseEnd == token.c_str() || !std::isfinite(seconds) || seconds < 0.0) return -1;
+
+    double seconds = 0.0;
+    if (token.find(':') != std::string::npos) {
+        // DLNA NPT also permits hh:mm:ss[.fraction].
+        std::istringstream in(token);
+        long long hours = 0;
+        int minutes = 0;
+        double secs = 0.0;
+        char colon1 = 0;
+        char colon2 = 0;
+        if (!(in >> hours >> colon1 >> minutes >> colon2 >> secs) ||
+            colon1 != ':' || colon2 != ':' || hours < 0 ||
+            minutes < 0 || minutes >= 60 || !std::isfinite(secs) ||
+            secs < 0.0 || secs >= 60.0) {
+            return -1;
+        }
+        in >> std::ws;
+        if (!in.eof()) return -1;
+        seconds = static_cast<double>(hours) * 3600.0 +
+                  static_cast<double>(minutes) * 60.0 + secs;
+    } else {
+        char* parseEnd = nullptr;
+        errno = 0;
+        seconds = std::strtod(token.c_str(), &parseEnd);
+        if (errno != 0 || parseEnd == token.c_str()) return -1;
+        while (*parseEnd != '\0' &&
+               std::isspace(static_cast<unsigned char>(*parseEnd))) {
+            ++parseEnd;
+        }
+        if (*parseEnd != '\0' || !std::isfinite(seconds) || seconds < 0.0) {
+            return -1;
+        }
+    }
+
+    constexpr double kMaxMilliseconds = static_cast<double>(INT64_MAX);
+    if (!std::isfinite(seconds) || seconds * 1000.0 > kMaxMilliseconds) {
+        return -1;
+    }
     return static_cast<int64_t>(seconds * 1000.0 + 0.5);
 }
 
@@ -251,6 +363,48 @@ bool SendAll(SOCKET socket, const char* data, size_t size) {
 
 bool SendAll(SOCKET socket, const std::string& text) {
     return SendAll(socket, text.data(), text.size());
+}
+
+void KeepTailBytes(std::vector<char>& tail,
+                   const char* data,
+                   size_t size,
+                   size_t limit) {
+    if (limit == 0 || size == 0) return;
+    if (size >= limit) {
+        tail.assign(data + (size - limit), data + size);
+        return;
+    }
+    if (tail.size() + size > limit) {
+        const size_t drop = tail.size() + size - limit;
+        tail.erase(tail.begin(), tail.begin() + static_cast<std::ptrdiff_t>(drop));
+    }
+    tail.insert(tail.end(), data, data + size);
+}
+
+bool SendMpegTsNullPadding(SOCKET socket, uint64_t bytes) {
+    if (bytes == 0) return true;
+    if ((bytes % kMpegTsPacketSize) != 0) return false;
+
+    constexpr size_t kPacketCount = 256;
+    std::array<char, static_cast<size_t>(kMpegTsPacketSize) * kPacketCount> padding{};
+    for (size_t packet = 0; packet < kPacketCount; ++packet) {
+        const size_t offset = packet * static_cast<size_t>(kMpegTsPacketSize);
+        padding[offset + 0] = 0x47;
+        padding[offset + 1] = 0x1f;
+        padding[offset + 2] = static_cast<char>(0xff);
+        padding[offset + 3] = static_cast<char>(0x10 | (packet & 0x0f));
+        std::fill(padding.begin() + static_cast<std::ptrdiff_t>(offset + 4),
+                  padding.begin() + static_cast<std::ptrdiff_t>(offset + kMpegTsPacketSize),
+                  static_cast<char>(0xff));
+    }
+
+    while (bytes > 0) {
+        const size_t chunk = static_cast<size_t>(
+            std::min<uint64_t>(bytes, static_cast<uint64_t>(padding.size())));
+        if (!SendAll(socket, padding.data(), chunk)) return false;
+        bytes -= static_cast<uint64_t>(chunk);
+    }
+    return true;
 }
 
 std::string HttpResponse(const std::string& body,
@@ -398,7 +552,10 @@ struct AiProcess {
 
 bool LaunchAiProcess(const std::filesystem::path& worker,
                      const std::filesystem::path& input,
+                     const std::filesystem::path& model,
                      int64_t start_ms,
+                     AiBackend backend,
+                     int device,
                      AiOutputMode output_mode,
                      AiProcess& result) {
     SECURITY_ATTRIBUTES sa{};
@@ -432,13 +589,15 @@ bool LaunchAiProcess(const std::filesystem::path& worker,
     startup.hStdOutput = stdout_write;
     startup.hStdError = stderr_write;
 
-    const std::filesystem::path model = ExecutableDirectory() / L"rvm_mobilenetv3_fp16.onnx";
-    const std::wstring command =
+    std::wstring command =
         QuoteWindowsArgument(worker.wstring()) + L" " +
         QuoteWindowsArgument(input.wstring()) + L" --model " +
-        QuoteWindowsArgument(model.wstring()) + L" --device 0 --qp 20 --start-ms " +
+        QuoteWindowsArgument(model.wstring()) + L" --device " +
+        std::to_wstring(device) + L" --qp 20 --start-ms " +
         std::to_wstring(start_ms) + L" --output-mode " +
         Utf8ToWide(AiOutputModeArgument(output_mode)) + L" --no-preview";
+    if (backend == AiBackend::DirectML) command += L" --backend dml";
+    else if (backend == AiBackend::Cpu) command += L" --backend cpu";
 
     std::vector<wchar_t> mutable_command(command.begin(), command.end());
     mutable_command.push_back(L'\0');
@@ -507,6 +666,8 @@ struct DlnaServer::ResidentAiState {
     HANDLE job = nullptr;
     std::thread stderr_thread;
     std::filesystem::path input;
+    AiBackend backend{AiBackend::NvidiaCuda};
+    int directml_device{0};
     int width{0};
     int height{0};
     std::atomic<bool> ready{false};
@@ -663,17 +824,28 @@ AiCapabilityResult DlnaServer::ProbeAiCapability() {
 }
 
 bool DlnaServer::StartResidentAiWorker(const std::filesystem::path& media_file) {
-    const std::filesystem::path worker = ExecutableDirectory() / L"r800zz_ai_worker.exe";
-    const std::filesystem::path model = ExecutableDirectory() / L"rvm_mobilenetv3_fp16.onnx";
+    // The resident process is backend-neutral. CUDA / DirectML / CPU are selected
+    // later by PREPARE/RUN commands without restarting r800zz_ai_worker.exe.
+    const std::filesystem::path directory = ExecutableDirectory();
+    const std::filesystem::path worker = directory / L"r800zz_ai_worker.exe";
+    const std::filesystem::path cudaModel = directory / L"rvm_mobilenetv3_fp16.onnx";
+    const std::filesystem::path dmlModel = directory / L"rvm_mobilenetv3_fp32.onnx";
     std::error_code ec;
     if (!std::filesystem::is_regular_file(worker, ec)) {
-        AddLog("AI prewarm error: r800zz_ai_worker.exe was not found next to the server EXE.");
+        AddLog("AI prewarm error: resident worker was not found: " + WideToUtf8(worker.wstring()));
         return false;
     }
-    if (!std::filesystem::is_regular_file(model, ec)) {
-        AddLog("AI prewarm error: rvm_mobilenetv3_fp16.onnx was not found next to the server EXE.");
+    ec.clear();
+    if (!std::filesystem::is_regular_file(cudaModel, ec)) {
+        AddLog("AI prewarm error: CUDA model was not found: " + WideToUtf8(cudaModel.wstring()));
         return false;
     }
+    ec.clear();
+    if (!std::filesystem::is_regular_file(dmlModel, ec)) {
+        AddLog("AI prewarm error: DirectML/CPU model was not found: " + WideToUtf8(dmlModel.wstring()));
+        return false;
+    }
+    ec.clear();
     if (!std::filesystem::is_regular_file(media_file, ec)) {
         AddLog("AI prewarm deferred: select a video file first.");
         return false;
@@ -719,9 +891,8 @@ bool DlnaServer::StartResidentAiWorker(const std::filesystem::path& media_file) 
 
     const std::wstring command =
         QuoteWindowsArgument(worker.wstring()) + L" " +
-        QuoteWindowsArgument(media_file.wstring()) + L" --model " +
-        QuoteWindowsArgument(model.wstring()) +
-        L" --device 0 --qp 20 --resident --no-preview";
+        QuoteWindowsArgument(media_file.wstring()) +
+        L" --qp 20 --resident --no-preview";
     std::vector<wchar_t> mutable_command(command.begin(), command.end());
     mutable_command.push_back(L'\0');
 
@@ -761,6 +932,8 @@ bool DlnaServer::StartResidentAiWorker(const std::filesystem::path& media_file) 
     state->stderr_read = stderr_read;
     state->job = job;
     state->input = media_file;
+    state->backend = ai_backend_;
+    state->directml_device = directml_device_;
     int64_t ignoredDuration = 0;
     ProbeMedia(media_file, ignoredDuration, state->width, state->height);
     ResidentAiState* raw = state.get();
@@ -796,7 +969,7 @@ bool DlnaServer::StartResidentAiWorker(const std::filesystem::path& media_file) 
         std::lock_guard<std::mutex> lock(resident_ai_mutex_);
         resident_ai_ = std::move(state);
     }
-    AddLog("AI worker/RVM prewarm started; waiting for RESIDENT_READY.");
+    AddLog("AI worker resident controller started.");
     return true;
 }
 
@@ -835,26 +1008,92 @@ void DlnaServer::StopResidentAiWorker() {
     AddLog("AI worker/RVM resident process stopped.");
 }
 
-bool DlnaServer::SetAiPrewarm(bool enabled, const std::filesystem::path& media_file) {
-    if (!enabled) {
-        StopResidentAiWorker();
-        return true;
-    }
+bool DlnaServer::SetAiPrewarm(bool enabled, const std::filesystem::path& media_file,
+                                AiBackend ai_backend, int directml_device) {
+    ai_backend_ = ai_backend;
+    directml_device_ = directml_device;
 
-    {
+    if (!enabled) {
+        // Keep the worker process and the prepared backend alive. Only stop the
+        // active stream; mode changes later reuse the same resident process.
         std::lock_guard<std::mutex> lock(resident_ai_mutex_);
-        if (resident_ai_ && resident_ai_->input == media_file) {
+        if (resident_ai_ && resident_ai_->stdin_write) {
             DWORD code = STILL_ACTIVE;
             if (resident_ai_->process &&
                 GetExitCodeProcess(resident_ai_->process, &code) &&
                 code == STILL_ACTIVE) {
-                return true;
+                std::lock_guard<std::mutex> controlLock(resident_ai_->control_mutex);
+                const char idle[] = "IDLE\n";
+                DWORD written = 0;
+                WriteFile(resident_ai_->stdin_write, idle,
+                          static_cast<DWORD>(sizeof(idle) - 1), &written, nullptr);
             }
+        }
+        return true;
+    }
+
+    bool residentAlive = false;
+    {
+        std::lock_guard<std::mutex> lock(resident_ai_mutex_);
+        if (resident_ai_ && resident_ai_->process) {
+            DWORD code = STILL_ACTIVE;
+            residentAlive =
+                GetExitCodeProcess(resident_ai_->process, &code) &&
+                code == STILL_ACTIVE;
         }
     }
 
-    StopResidentAiWorker();
-    return StartResidentAiWorker(media_file);
+    if (!residentAlive) {
+        StopResidentAiWorker();
+        if (!StartResidentAiWorker(media_file)) {
+            return false;
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(resident_ai_mutex_);
+    if (!resident_ai_ || !resident_ai_->stdin_write) {
+        return false;
+    }
+
+    if (resident_ai_->input == media_file &&
+        resident_ai_->backend == ai_backend &&
+        resident_ai_->directml_device == directml_device &&
+        resident_ai_->ready.load()) {
+        return true;
+    }
+
+    resident_ai_->input = media_file;
+    resident_ai_->backend = ai_backend;
+    resident_ai_->directml_device = directml_device;
+    resident_ai_->ready.store(false);
+    int64_t ignoredDuration = 0;
+    ProbeMedia(media_file, ignoredDuration,
+               resident_ai_->width, resident_ai_->height);
+
+    const int device =
+        ai_backend == AiBackend::NvidiaCuda ? 0 :
+        (ai_backend == AiBackend::DirectML ? directml_device : -1);
+    const std::string command =
+        "PREPARE " + AiBackendArgument(ai_backend) + " " +
+        std::to_string(device) + " " +
+        HexEncode(WideToUtf8(media_file.wstring())) + "\n";
+
+    std::lock_guard<std::mutex> controlLock(resident_ai_->control_mutex);
+    DWORD written = 0;
+    const bool ok =
+        WriteFile(resident_ai_->stdin_write, command.data(),
+                  static_cast<DWORD>(command.size()), &written, nullptr) &&
+        written == command.size();
+    if (!ok) {
+        AddLog("AI resident PREPARE command failed Win32=" +
+               std::to_string(GetLastError()));
+        return false;
+    }
+
+    AddLog("AI resident backend prepare requested backend=" +
+           AiBackendArgument(ai_backend) +
+           " device=" + std::to_string(device) + ".");
+    return true;
 }
 
 bool DlnaServer::IsAiPrewarmReady() const {
@@ -982,7 +1221,9 @@ bool DlnaServer::ProbeMedia(const std::filesystem::path& path,
 bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
                        const std::string& advertised_ip,
                        bool ai_passthrough,
-                       AiOutputMode ai_output_mode) {
+                       AiOutputMode ai_output_mode,
+                       AiBackend ai_backend,
+                       int directml_device) {
     Stop();
 
     if (media_files.empty()) {
@@ -1028,10 +1269,16 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
     advertised_ip_ = advertised_ip;
     ai_passthrough_ = ai_passthrough;
     ai_output_mode_ = ai_output_mode;
+    ai_backend_ = ai_backend;
+    directml_device_ = directml_device;
+
+    // CUDA/DirectML/CPU use the same resident/prewarm lifecycle.
+    // Normally this worker is already resident before Start(); this is only
+    // a safety net if Start() is called without a completed prewarm.
     if (ai_passthrough_) {
-        SetAiPrewarm(true, media_items_.front().path);
+        SetAiPrewarm(true, media_items_.front().path, ai_backend_, directml_device_);
     } else {
-        SetAiPrewarm(false, {});
+        SetAiPrewarm(false, {}, ai_backend_, directml_device_);
     }
     uuid_ = MakeUuid();
 
@@ -1421,6 +1668,19 @@ void DlnaServer::HandleHttpClient(SOCKET client) {
     if (routeQuery != std::string::npos) routePath.resize(routeQuery);
     const std::string routePathLower = ToLower(routePath);
 
+    // Only our own player is a guaranteed compatibility exception. All other
+    // clients use the generic DLNA/HTTP virtual-range experiment.
+    g_r800zz_vrplayer_request = IsR800zzVrPlayerRequest(request);
+    if (ai_passthrough_ &&
+        (routePathLower == "/contentdirectory/control" ||
+         routePathLower == "/connectionmanager/control" ||
+         routePathLower == "/media" ||
+         routePathLower.rfind("/media/", 0) == 0)) {
+        AddLog(std::string("CLIENT_PROFILE=") +
+               (g_r800zz_vrplayer_request ? "R800ZZ" : "GENERIC_SEEKABLE") +
+               " request=\"" + FirstLine(request) + "\"");
+    }
+
     if (routePathLower == "/device.xml" ||
         routePathLower.rfind("/contentdirectory/", 0) == 0 ||
         routePathLower.rfind("/connectionmanager/", 0) == 0) {
@@ -1528,6 +1788,8 @@ void DlnaServer::HandleHttpClient(SOCKET client) {
             return;
         }
         if (ai_passthrough_) {
+            // CUDA / DirectML / CPU all use the same DLNA/HTTP/pipe streaming path.
+            // Only the worker/model/backend selection differs.
             HandleAiPassthroughStream(client, method, request, *item);
             closesocket(client);
             return;
@@ -1626,55 +1888,228 @@ void DlnaServer::HandleHttpClient(SOCKET client) {
     closesocket(client);
 }
 
+
+void DlnaServer::HandleDirectMlPassthroughStream(
+        SOCKET client,
+        const std::string& method,
+        const std::string& request,
+        const MediaItem& item) {
+    // Compatibility wrapper: DirectML must use exactly the same streaming
+    // response/pipe/timing path as CUDA. Backend differences are selected
+    // inside HandleAiPassthroughStream().
+    HandleAiPassthroughStream(client, method, request, item);
+}
+
 void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                                             const std::string& method,
                                             const std::string& request,
                                             const MediaItem& item) {
-    // AI output is generated on demand, so byte-range seek is not advertised.
-    // A fresh response can instead be generated from a DLNA time position.
-    const std::string byteRange = HeaderValue(request, "range");
-    if (!byteRange.empty()) {
-        std::ostringstream response;
-        response << "HTTP/1.1 416 Range Not Satisfiable\r\n"
-                 << "Accept-Ranges: none\r\n"
-                 << "Content-Length: 0\r\n"
-                 << "Connection: close\r\n\r\n";
-        AddLog(method + " /media " + byteRange + " -> 416 (use DLNA TimeSeekRange)");
-        SendAll(client, response.str());
-        return;
-    }
-
+    // AI output is generated on demand. DLNA time seek is preferred over
+    // HTTP byte-range seek because the transcoded output length is not known.
     int64_t requested_start_ms = 0;
-    bool time_seek_request = false;
+    bool dlna_time_seek_request = false;
+    bool legacy_r800zz_seek_request = false;
     const std::string timeSeek = HeaderValue(request, "timeseekrange.dlna.org");
     const int64_t dlnaStartMs = ParseDlnaTimeSeekStartMs(timeSeek);
     if (dlnaStartMs >= 0) {
         requested_start_ms = dlnaStartMs;
-        time_seek_request = true;
+        dlna_time_seek_request = true;
     } else {
-        // Backward-compatible fallback for older R800ZZ VR Player builds.
+        // Backward-compatible fallback for existing R800ZZ VR Player builds.
         const std::string startHeader = HeaderValue(request, "x-r800zz-start-ms");
         if (!startHeader.empty()) {
             char* end = nullptr;
             const long long parsed = std::strtoll(startHeader.c_str(), &end, 10);
             if (end != startHeader.c_str() && parsed >= 0) {
                 requested_start_ms = static_cast<int64_t>(parsed);
-                time_seek_request = requested_start_ms > 0;
+                legacy_r800zz_seek_request = requested_start_ms > 0;
             }
         }
+    }
+
+    // Generic DLNA/HTTP clients may use the experimental virtual byte range.
+    // r800zzvrplayer is the only compatibility exception because its User-Agent
+    // and custom X-R800ZZ-Start-Ms behavior are under our control.
+    const bool virtual_range_enabled = !g_r800zz_vrplayer_request;
+    const bool fixed_muxrate_ts =
+        ai_output_mode_ != AiOutputMode::WebmVp9Alpha;
+    const uint64_t virtual_total_bytes = virtual_range_enabled
+        ? (fixed_muxrate_ts
+            ? RealtimeTsVirtualSizeBytes(item.duration_ms)
+            : item.size)
+        : 0;
+    uint64_t virtual_range_start = 0;
+    uint64_t virtual_range_end = virtual_total_bytes > 0 ? virtual_total_bytes - 1 : 0;
+    bool virtual_byte_seek_request = false;
+    bool virtual_tail_duration_probe = false;
+    uint64_t worker_prefix_discard_bytes = 0;
+    const std::string byteRange = HeaderValue(request, "range");
+    if (!byteRange.empty() && !dlna_time_seek_request && !legacy_r800zz_seek_request) {
+        if (!virtual_range_enabled) {
+            std::ostringstream response;
+            response << "HTTP/1.1 416 Range Not Satisfiable\r\n"
+                     << "Accept-Ranges: none\r\n"
+                     << "Content-Length: 0\r\n"
+                     << "Connection: close\r\n\r\n";
+            AddLog(method + " /media " + byteRange +
+                   " -> 416 byte range disabled for r800zzvrplayer");
+            SendAll(client, response.str());
+            return;
+        }
+
+        if (virtual_total_bytes == 0 || item.duration_ms <= 0 ||
+            !ParseRange(byteRange, virtual_total_bytes,
+                        virtual_range_start, virtual_range_end)) {
+            std::ostringstream response;
+            response << "HTTP/1.1 416 Range Not Satisfiable\r\n"
+                     << "Accept-Ranges: bytes\r\n";
+            if (virtual_total_bytes > 0) {
+                response << "Content-Range: bytes */" << virtual_total_bytes << "\r\n";
+            }
+            response << "Content-Length: 0\r\n"
+                     << "Connection: close\r\n\r\n";
+            AddLog(method + " /media " + byteRange + " -> 416 virtual AI range");
+            SendAll(client, response.str());
+            return;
+        }
+
+        virtual_byte_seek_request = true;
+
+        const uint64_t requested_range_length =
+            virtual_range_end - virtual_range_start + 1;
+        virtual_tail_duration_probe =
+            fixed_muxrate_ts &&
+            virtual_range_end + 1 == virtual_total_bytes &&
+            requested_range_length <= kTsDurationProbeBytes &&
+            virtual_range_start >=
+                (virtual_total_bytes > kTsDurationProbeBytes
+                    ? virtual_total_bytes - kTsDurationProbeBytes : 0);
+
+        if (virtual_tail_duration_probe) {
+            // Duration readers probe a small window at logical EOF to find
+            // the final PCR. A proportional seek can leave only a few
+            // milliseconds of source and produce no TS packet. Give the muxer
+            // one second of source material, while returning only the exact
+            // requested tail byte count.
+            requested_start_ms = std::max<int64_t>(
+                0, item.duration_ms - kTsDurationProbeLeadMs);
+            AddLog("GENERIC_SEEKABLE tail PCR probe range=" + byteRange +
+                   " bytes=" + std::to_string(requested_range_length) +
+                   " workerStartMs=" + std::to_string(requested_start_ms));
+        } else {
+            const long double fraction =
+                static_cast<long double>(virtual_range_start) /
+                static_cast<long double>(virtual_total_bytes);
+            requested_start_ms = static_cast<int64_t>(
+                fraction * static_cast<long double>(item.duration_ms));
+            if (item.duration_ms > 0) {
+                requested_start_ms =
+                    std::min(requested_start_ms, item.duration_ms - 1);
+            }
+
+            // Worker seek granularity is milliseconds, while HTTP Range is
+            // byte exact. Discard the remaining sub-millisecond prefix so a
+            // request such as bytes=940- does not incorrectly return byte 0.
+            if (fixed_muxrate_ts) {
+                const long double mapped_bytes_ld =
+                    static_cast<long double>(requested_start_ms) *
+                    static_cast<long double>(
+                        kRealtimeTsMuxRateBitsPerSecond) / 8000.0L;
+                const uint64_t mapped_start_byte =
+                    mapped_bytes_ld > 0.0L
+                        ? static_cast<uint64_t>(std::floor(mapped_bytes_ld))
+                        : 0;
+                if (virtual_range_start > mapped_start_byte) {
+                    worker_prefix_discard_bytes =
+                        virtual_range_start - mapped_start_byte;
+                }
+            }
+
+            AddLog("AI virtual byte seek " + byteRange +
+                   " -> startMs=" + std::to_string(requested_start_ms) +
+                   " prefixDiscard=" +
+                   std::to_string(worker_prefix_discard_bytes) +
+                   " virtualTotal=" +
+                   std::to_string(virtual_total_bytes));
+        }
+    }
+
+    if (dlna_time_seek_request) {
+        AddLog("DLNA TimeSeekRange request startMs=" +
+               std::to_string(requested_start_ms));
+        if (!byteRange.empty()) {
+            AddLog("DLNA TimeSeekRange takes precedence over HTTP Range: " +
+                   byteRange);
+        }
+    } else if (legacy_r800zz_seek_request && !byteRange.empty()) {
+        AddLog("R800ZZ start-ms takes precedence over HTTP Range: " + byteRange);
     }
     if (item.duration_ms > 0) {
         requested_start_ms = std::min(requested_start_ms, item.duration_ms);
     }
 
+    const bool virtual_finite_response =
+        virtual_range_enabled && virtual_total_bytes > 0 && item.duration_ms > 0 &&
+        !dlna_time_seek_request && !legacy_r800zz_seek_request;
+    const uint64_t virtual_head_length = virtual_byte_seek_request
+        ? (virtual_range_end - virtual_range_start + 1)
+        : (virtual_finite_response ? virtual_total_bytes : 0);
+
+    // Only fixed-muxrate MPEG-TS can make streaming GET Content-Length
+    // match the bytes actually delivered. WebM keeps its existing behavior.
+    const bool finite_ts_body =
+        fixed_muxrate_ts && virtual_finite_response;
+    const uint64_t virtual_body_length = finite_ts_body
+        ? (virtual_byte_seek_request
+            ? (virtual_range_end - virtual_range_start + 1)
+            : virtual_total_bytes)
+        : 0;
+
+    std::string generic_tail_probe_cache_key;
+    if (virtual_tail_duration_probe && finite_ts_body) {
+        const int cacheDevice =
+            ai_backend_ == AiBackend::NvidiaCuda ? 0 :
+            (ai_backend_ == AiBackend::DirectML ? directml_device_ : -1);
+        generic_tail_probe_cache_key =
+            WideToUtf8(item.path.wstring()) + "|" +
+            std::to_string(item.size) + "|" +
+            std::to_string(item.duration_ms) + "|" +
+            AiBackendArgument(ai_backend_) + "|" +
+            std::to_string(cacheDevice) + "|" +
+            AiOutputModeArgument(ai_output_mode_) + "|" +
+            std::to_string(virtual_total_bytes);
+    }
+
+    if (virtual_range_enabled) {
+        AddLog("GENERIC_SEEKABLE totalBytes=" +
+               std::to_string(virtual_total_bytes) +
+               " muxRateBitsPerSecond=" +
+               std::to_string(kRealtimeTsMuxRateBitsPerSecond) +
+               " contentLength=" + std::to_string(virtual_body_length) +
+               " startMs=" + std::to_string(requested_start_ms) +
+               " tailProbe=" + (virtual_tail_duration_probe ? "1" : "0") +
+               " prefixDiscard=" +
+               std::to_string(worker_prefix_discard_bytes));
+    }
+
     // HEAD is a file/capability probe and never starts the GPU worker.
     if (method == "HEAD") {
         std::ostringstream headers;
-        headers << "HTTP/1.1 200 OK\r\n"
+        headers << "HTTP/1.1 "
+                << (virtual_byte_seek_request ? "206 Partial Content" : "200 OK") << "\r\n"
                 << "Content-Type: " << MimeType(item) << "\r\n"
-                << "Accept-Ranges: none\r\n"
+                << "Accept-Ranges: "
+                << ((virtual_finite_response || virtual_byte_seek_request) ? "bytes" : "none")
+                << "\r\n"
                 << "transferMode.dlna.org: Streaming\r\n"
                 << "contentFeatures.dlna.org: " << DlnaContentFeatures() << "\r\n";
+        if (virtual_finite_response || virtual_byte_seek_request) {
+            headers << "Content-Length: " << virtual_head_length << "\r\n";
+        }
+        if (virtual_byte_seek_request) {
+            headers << "Content-Range: bytes " << virtual_range_start << '-'
+                    << virtual_range_end << '/' << virtual_total_bytes << "\r\n";
+        }
         if (item.duration_ms > 0) {
             const std::string duration = FormatNptMs(item.duration_ms);
             headers << "X-R800ZZ-Duration-Ms: " << item.duration_ms << "\r\n"
@@ -1682,21 +2117,73 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
         }
         headers << "EXT:\r\n"
                 << "Connection: close\r\n\r\n";
-        AddLog("HEAD /media -> 200 AI file capability probe");
+        AddLog(std::string("HEAD /media -> ") +
+               (virtual_byte_seek_request ? "206 virtual AI range" :
+                                            "200 virtual finite AI file") +
+               " Content-Length=" + std::to_string(virtual_head_length) +
+               " totalBytes=" + std::to_string(virtual_total_bytes));
         SendAll(client, headers.str());
         return;
     }
 
-    const std::filesystem::path worker = ExecutableDirectory() / L"r800zz_ai_worker.exe";
-    const std::filesystem::path model = ExecutableDirectory() / L"rvm_mobilenetv3_fp16.onnx";
+    // ExoPlayer/Media3 repeats the logical-EOF PCR probe when rebuilding its
+    // extractor around a seek. The probe bytes are stable for the same media /
+    // backend / output mode, so reuse the first successful result instead of
+    // interrupting the resident AI stream with another RUN command.
+    if (method == "GET" && virtual_tail_duration_probe && finite_ts_body) {
+        std::vector<char> cachedTail;
+        if (LoadGenericTailProbeCache(
+                generic_tail_probe_cache_key, virtual_body_length, cachedTail)) {
+            std::ostringstream headers;
+            headers << "HTTP/1.1 206 Partial Content\r\n"
+                    << "Content-Type: " << MimeType(item) << "\r\n"
+                    << "Accept-Ranges: bytes\r\n"
+                    << "transferMode.dlna.org: Streaming\r\n"
+                    << "contentFeatures.dlna.org: " << DlnaContentFeatures() << "\r\n"
+                    << "Content-Length: " << cachedTail.size() << "\r\n"
+                    << "Content-Range: bytes " << virtual_range_start << '-'
+                    << virtual_range_end << '/' << virtual_total_bytes << "\r\n";
+            if (item.duration_ms > 0) {
+                const std::string duration = FormatNptMs(item.duration_ms);
+                const std::string begin = FormatNptMs(requested_start_ms);
+                headers << "X-R800ZZ-Duration-Ms: " << item.duration_ms << "\r\n"
+                        << "X-AvailableSeekRange: 1 npt=0.000-" << duration << "\r\n"
+                        << "TimeSeekRange.dlna.org: npt=" << begin << '-'
+                        << duration << '/' << duration << "\r\n";
+            }
+            if (requested_start_ms > 0) {
+                headers << "X-R800ZZ-Start-Ms: " << requested_start_ms << "\r\n";
+            }
+            headers << "EXT:\r\nConnection: close\r\n\r\n";
+
+            const bool ok = SendAll(client, headers.str()) &&
+                SendAll(client, cachedTail.data(), cachedTail.size());
+            AddLog("GENERIC_SEEKABLE tail PCR probe cache hit bytes=" +
+                   std::to_string(cachedTail.size()) +
+                   (ok ? "" : " (client disconnected/send failed)"));
+            return;
+        }
+        AddLog("GENERIC_SEEKABLE tail PCR probe cache miss");
+    }
+
+    const bool cudaBackend = ai_backend_ == AiBackend::NvidiaCuda;
+    // CUDA / DirectML / CPU all use the same worker executable.
+    const std::filesystem::path worker =
+        ExecutableDirectory() / L"r800zz_ai_worker.exe";
+    const std::filesystem::path model = cudaBackend
+        ? ExecutableDirectory() / L"rvm_mobilenetv3_fp16.onnx"
+        : ExecutableDirectory() / L"rvm_mobilenetv3_fp32.onnx";
     std::error_code ec;
     if (!std::filesystem::is_regular_file(worker, ec)) {
-        AddLog("AI Passthrough error: r800zz_ai_worker.exe was not found next to the server EXE.");
+        AddLog(std::string("AI Passthrough error: worker missing: ") +
+               WideToUtf8(worker.wstring()));
         SendAll(client, HttpError(500, "AI Worker Missing"));
         return;
     }
+    ec.clear();
     if (!std::filesystem::is_regular_file(model, ec)) {
-        AddLog("AI Passthrough error: rvm_mobilenetv3_fp16.onnx was not found next to the server EXE.");
+        AddLog(std::string("AI Passthrough error: model missing: ") +
+               WideToUtf8(model.wstring()));
         SendAll(client, HttpError(500, "RVM Model Missing"));
         return;
     }
@@ -1704,8 +2191,7 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
     ResidentAiState* resident = nullptr;
     {
         std::lock_guard<std::mutex> lock(resident_ai_mutex_);
-        if (resident_ai_ && resident_ai_->width == item.width &&
-            resident_ai_->height == item.height) {
+        if (resident_ai_) {
             DWORD code = STILL_ACTIVE;
             if (resident_ai_->process &&
                 GetExitCodeProcess(resident_ai_->process, &code) &&
@@ -1715,24 +2201,9 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
         }
     }
 
-    if (resident) {
-        const auto readyBegin = std::chrono::steady_clock::now();
-        while (!resident->ready.load()) {
-            DWORD code = STILL_ACTIVE;
-            if (!GetExitCodeProcess(resident->process, &code) || code != STILL_ACTIVE) {
-                AddLog("AI resident worker exited before becoming ready; using one-shot worker.");
-                resident = nullptr;
-                break;
-            }
-            if (std::chrono::duration_cast<std::chrono::seconds>(
-                    std::chrono::steady_clock::now() - readyBegin).count() >= 120) {
-                AddLog("AI resident worker warmup timed out; using one-shot worker.");
-                resident = nullptr;
-                break;
-            }
-            Sleep(10);
-        }
-    }
+    // Do not gate RUN on the currently prepared backend or media dimensions.
+    // RUN carries backend/device/input and the resident worker switches its
+    // internal session in-process when necessary.
 
     if (resident) {
         const uint64_t sequence = resident->request_sequence.fetch_add(1) + 1;
@@ -1749,9 +2220,14 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                    std::to_string(GetLastError()) + "; using one-shot worker.");
             resident = nullptr;
         } else {
+            const int residentDevice =
+                ai_backend_ == AiBackend::NvidiaCuda ? 0 :
+                (ai_backend_ == AiBackend::DirectML ? directml_device_ : -1);
             const std::string runCommand =
                 "RUN " + std::to_string(sequence) + " " +
                 std::to_string(requested_start_ms) + " " +
+                AiBackendArgument(ai_backend_) + " " +
+                std::to_string(residentDevice) + " " +
                 AiOutputModeArgument(ai_output_mode_) + " " + pipeName + " " +
                 HexEncode(WideToUtf8(item.path.wstring())) + "\n";
             bool commandOk = false;
@@ -1851,11 +2327,21 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
 
                     std::ostringstream headers;
                     headers << "HTTP/1.1 "
-                            << (time_seek_request ? "206 Partial Content" : "200 OK") << "\r\n"
+                            << ((dlna_time_seek_request || legacy_r800zz_seek_request || virtual_byte_seek_request)
+                                ? "206 Partial Content" : "200 OK") << "\r\n"
                             << "Content-Type: " << MimeType(item) << "\r\n"
-                            << "Accept-Ranges: none\r\n"
+                            << "Accept-Ranges: "
+                            << ((virtual_finite_response || virtual_byte_seek_request) ? "bytes" : "none")
+                            << "\r\n"
                             << "transferMode.dlna.org: Streaming\r\n"
                             << "contentFeatures.dlna.org: " << DlnaContentFeatures() << "\r\n";
+                    if (finite_ts_body) {
+                        headers << "Content-Length: " << virtual_body_length << "\r\n";
+                    }
+                    if (virtual_byte_seek_request) {
+                        headers << "Content-Range: bytes " << virtual_range_start << '-'
+                                << virtual_range_end << '/' << virtual_total_bytes << "\r\n";
+                    }
                     if (item.duration_ms > 0) {
                         const std::string duration = FormatNptMs(item.duration_ms);
                         const std::string begin = FormatNptMs(requested_start_ms);
@@ -1871,12 +2357,57 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
 
                     bool sendFailed = !SendAll(client, headers.str());
                     uint64_t sentBody = 0;
-                    if (!sendFailed) {
-                        sendFailed = !SendAll(client, data.data(), static_cast<size_t>(firstGot));
-                        if (!sendFailed) sentBody += firstGot;
+                    bool virtualBodyComplete = false;
+                    std::vector<char> tailProbeBody;
+                    if (virtual_tail_duration_probe) {
+                        tailProbeBody.reserve(static_cast<size_t>(virtual_body_length));
                     }
 
-                    while (!sendFailed && running_) {
+                    uint64_t prefixDiscardRemaining =
+                        worker_prefix_discard_bytes;
+                    auto sendBodyChunk = [&](const char* bytes, size_t count) -> bool {
+                        if (count == 0) return true;
+                        if (prefixDiscardRemaining > 0) {
+                            const size_t discard = static_cast<size_t>(
+                                std::min<uint64_t>(
+                                    prefixDiscardRemaining,
+                                    static_cast<uint64_t>(count)));
+                            bytes += discard;
+                            count -= discard;
+                            prefixDiscardRemaining -=
+                                static_cast<uint64_t>(discard);
+                            if (count == 0) return true;
+                        }
+                        if (virtual_tail_duration_probe) {
+                            KeepTailBytes(tailProbeBody, bytes, count,
+                                          static_cast<size_t>(virtual_body_length));
+                            return true;
+                        }
+                        size_t sendSize = count;
+                        if (finite_ts_body) {
+                            if (sentBody >= virtual_body_length) {
+                                virtualBodyComplete = true;
+                                return true;
+                            }
+                            sendSize = static_cast<size_t>(std::min<uint64_t>(
+                                static_cast<uint64_t>(count),
+                                virtual_body_length - sentBody));
+                        }
+                        if (sendSize > 0 && !SendAll(client, bytes, sendSize)) return false;
+                        sentBody += static_cast<uint64_t>(sendSize);
+                        if (finite_ts_body && sentBody >= virtual_body_length) {
+                            virtualBodyComplete = true;
+                        }
+                        return true;
+                    };
+
+                    if (!sendFailed) {
+                        sendFailed = !sendBodyChunk(
+                            data.data(), static_cast<size_t>(firstGot));
+                    }
+
+                    auto pipeGapStart = std::chrono::steady_clock::time_point{};
+                    while (!sendFailed && !virtualBodyComplete && running_) {
                         DWORD available = 0;
                         if (!PeekNamedPipe(streamPipe, nullptr, 0, nullptr,
                                            &available, nullptr)) {
@@ -1888,8 +2419,22 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                             break;
                         }
                         if (available == 0) {
+                            if (pipeGapStart == std::chrono::steady_clock::time_point{}) {
+                                pipeGapStart = std::chrono::steady_clock::now();
+                            }
                             Sleep(2);
                             continue;
+                        }
+                        if (pipeGapStart != std::chrono::steady_clock::time_point{}) {
+                            const auto gapMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - pipeGapStart).count();
+                            if (gapMs >= 80) {
+                                AddLog("SERVER_PIPE_GAP mode=resident ms=" +
+                                       std::to_string(gapMs) +
+                                       " available=" + std::to_string(available) +
+                                       " sentBody=" + std::to_string(sentBody));
+                            }
+                            pipeGapStart = std::chrono::steady_clock::time_point{};
                         }
                         DWORD got = 0;
                         const DWORD want = static_cast<DWORD>(
@@ -1898,15 +2443,73 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                             sendFailed = true;
                             break;
                         }
-                        if (!SendAll(client, data.data(), static_cast<size_t>(got))) {
+                        const auto sendStart = std::chrono::steady_clock::now();
+                        if (!sendBodyChunk(data.data(), static_cast<size_t>(got))) {
                             sendFailed = true;
                             break;
                         }
-                        sentBody += got;
+                        const auto sendMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - sendStart).count();
+                        if (sendMs >= 80) {
+                            AddLog("SERVER_SEND_SLOW mode=resident ms=" +
+                                   std::to_string(sendMs) +
+                                   " bytes=" + std::to_string(got) +
+                                   " sentBody=" + std::to_string(sentBody));
+                        }
+                    }
+
+                    if (!sendFailed && virtual_tail_duration_probe) {
+                        if (tailProbeBody.size() == virtual_body_length) {
+                            StoreGenericTailProbeCache(
+                                generic_tail_probe_cache_key, tailProbeBody);
+                            if (!SendAll(client, tailProbeBody.data(), tailProbeBody.size())) {
+                                sendFailed = true;
+                            } else {
+                                sentBody = static_cast<uint64_t>(tailProbeBody.size());
+                                virtualBodyComplete = true;
+                                AddLog("GENERIC_SEEKABLE tail PCR probe returned actual EOF tail bytes=" +
+                                       std::to_string(sentBody));
+                            }
+                        } else {
+                            AddLog("GENERIC_SEEKABLE tail PCR probe ended short bytes=" +
+                                   std::to_string(tailProbeBody.size()) +
+                                   " expected=" + std::to_string(virtual_body_length));
+                        }
+                    }
+
+                    if (!sendFailed && !virtual_tail_duration_probe &&
+                        finite_ts_body && sentBody < virtual_body_length) {
+                        const int64_t remainingMs = std::max<int64_t>(
+                            0, item.duration_ms - requested_start_ms);
+                        const auto elapsedMs =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - startupBegin).count();
+                        const bool naturalEofLikely =
+                            remainingMs <= 0 || elapsedMs + 2000 >= remainingMs;
+                        const uint64_t missing = virtual_body_length - sentBody;
+                        if (naturalEofLikely &&
+                            (missing % kMpegTsPacketSize) == 0) {
+                            AddLog("GENERIC_SEEKABLE natural EOF padding MPEG-TS bytes=" +
+                                   std::to_string(missing) +
+                                   " elapsedMs=" + std::to_string(elapsedMs) +
+                                   " expectedPlaybackMs=" + std::to_string(remainingMs));
+                            if (SendMpegTsNullPadding(client, missing)) {
+                                sentBody = virtual_body_length;
+                                virtualBodyComplete = true;
+                            } else {
+                                sendFailed = true;
+                            }
+                        } else {
+                            AddLog("GENERIC_SEEKABLE stream ended short; padding suppressed bytes=" +
+                                   std::to_string(sentBody) +
+                                   " expected=" + std::to_string(virtual_body_length) +
+                                   " elapsedMs=" + std::to_string(elapsedMs) +
+                                   " expectedPlaybackMs=" + std::to_string(remainingMs));
+                        }
                     }
 
                     CloseHandle(streamPipe);
-                    if (sendFailed || !running_) {
+                    if (sendFailed || !running_ || virtualBodyComplete) {
                         std::lock_guard<std::mutex> controlLock(resident->control_mutex);
                         const std::string cancel =
                             "CANCEL " + std::to_string(sequence) + "\n";
@@ -1916,6 +2519,9 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                     }
 
                     AddLog("AI /media resident body sent=" + std::to_string(sentBody) +
+                           (finite_ts_body
+                               ? " expected=" + std::to_string(virtual_body_length)
+                               : std::string{}) +
                            (sendFailed ? " (client disconnected/send failed)" : ""));
                     return;
                 }
@@ -1927,21 +2533,28 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
     // 200 first and then initialized CUDA/ONNX/NVENC.  Some clients time out
     // when the response body remains empty during that initialization window.
     AiProcess process;
-    if (!LaunchAiProcess(worker, item.path, requested_start_ms,
-                         ai_output_mode_, process)) {
-        AddLog("AI Passthrough error: could not start r800zz_ai_worker.exe. Win32=" +
+    const bool launched = LaunchAiProcess(
+        worker, item.path, model, requested_start_ms,
+        ai_backend_, cudaBackend ? 0 : directml_device_,
+        ai_output_mode_, process);
+    if (!launched) {
+        AddLog("AI Passthrough error: could not start worker. Win32=" +
                std::to_string(GetLastError()));
         SendAll(client, HttpError(500, "AI Worker Start Failed"));
         return;
     }
 
-    AddLog("AI Passthrough C++ GPU worker starting; waiting for first output bytes before HTTP 200. RVM uses ONNX Runtime CUDA EP with GPU I/O binding. Output=" + AiOutputLabel());
+    AddLog(std::string("AI Passthrough common stream path starting backend=") +
+           (cudaBackend ? "CUDA" :
+            (ai_backend_ == AiBackend::DirectML ? "DirectML" : "CPU")) +
+           "; waiting for first output bytes before HTTP 200. Output=" +
+           AiOutputLabel());
     if (requested_start_ms > 0) {
         AddLog("AI Passthrough seek request startMs=" + std::to_string(requested_start_ms));
     }
 
     std::atomic<int64_t> source_duration_ms{0};
-    std::thread stderr_thread([this, handle = process.stderr_read, &source_duration_ms]() {
+    std::thread stderr_thread([this, handle = process.stderr_read, &source_duration_ms, cudaBackend]() {
         std::array<char, 4096> data{};
         std::string pending;
         DWORD got = 0;
@@ -1962,12 +2575,12 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                     }
                 }
                 line = SanitizeWorkerLog(line);
-                if (!line.empty()) AddLog("GPU: " + line);
+                if (!line.empty()) AddLog(std::string(cudaBackend ? "GPU: " : "DML: ") + line);
                 pending.erase(0, pos + 1);
             }
         }
         pending = SanitizeWorkerLog(pending);
-        if (!pending.empty()) AddLog("GPU: " + pending);
+        if (!pending.empty()) AddLog(std::string(cudaBackend ? "GPU: " : "DML: ") + pending);
     });
 
     std::array<char, 256 * 1024> data{};
@@ -2002,7 +2615,8 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
             static thread_local long long last_reported = -1;
             if (elapsed != last_reported) {
                 last_reported = elapsed;
-                AddLog("GPU: CUDA pipeline startup still running elapsedSec=" + std::to_string(elapsed));
+                AddLog(std::string(cudaBackend ? "GPU: CUDA" : "DML: DirectML") +
+                       " pipeline startup still running elapsedSec=" + std::to_string(elapsed));
             }
         }
         if (elapsed >= 120) {
@@ -2041,11 +2655,22 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
     }
 
     std::ostringstream headers;
-    headers << "HTTP/1.1 " << (time_seek_request ? "206 Partial Content" : "200 OK") << "\r\n"
+    headers << "HTTP/1.1 "
+            << ((dlna_time_seek_request || legacy_r800zz_seek_request || virtual_byte_seek_request)
+                ? "206 Partial Content" : "200 OK") << "\r\n"
             << "Content-Type: " << MimeType(item) << "\r\n"
-            << "Accept-Ranges: none\r\n"
+            << "Accept-Ranges: "
+            << ((virtual_finite_response || virtual_byte_seek_request) ? "bytes" : "none")
+            << "\r\n"
             << "transferMode.dlna.org: Streaming\r\n"
             << "contentFeatures.dlna.org: " << DlnaContentFeatures() << "\r\n";
+    if (finite_ts_body) {
+        headers << "Content-Length: " << virtual_body_length << "\r\n";
+    }
+    if (virtual_byte_seek_request) {
+        headers << "Content-Range: bytes " << virtual_range_start << '-'
+                << virtual_range_end << '/' << virtual_total_bytes << "\r\n";
+    }
     const int64_t duration_ms = item.duration_ms > 0
         ? item.duration_ms
         : source_duration_ms.load();
@@ -2072,25 +2697,133 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
 
     uint64_t sent_body = 0;
     bool send_failed = false;
-    if (!SendAll(client, data.data(), static_cast<size_t>(first_got))) {
-        send_failed = true;
-    } else {
-        sent_body += static_cast<uint64_t>(first_got);
+    bool virtual_body_complete = false;
+    std::vector<char> tail_probe_body;
+    if (virtual_tail_duration_probe) {
+        tail_probe_body.reserve(static_cast<size_t>(virtual_body_length));
     }
 
-    while (!send_failed && running_) {
+    uint64_t prefix_discard_remaining = worker_prefix_discard_bytes;
+    auto send_body_chunk = [&](const char* bytes, size_t count) -> bool {
+        if (count == 0) return true;
+        if (prefix_discard_remaining > 0) {
+            const size_t discard = static_cast<size_t>(
+                std::min<uint64_t>(
+                    prefix_discard_remaining,
+                    static_cast<uint64_t>(count)));
+            bytes += discard;
+            count -= discard;
+            prefix_discard_remaining -= static_cast<uint64_t>(discard);
+            if (count == 0) return true;
+        }
+        if (virtual_tail_duration_probe) {
+            KeepTailBytes(tail_probe_body, bytes, count,
+                          static_cast<size_t>(virtual_body_length));
+            return true;
+        }
+        size_t send_size = count;
+        if (finite_ts_body) {
+            if (sent_body >= virtual_body_length) {
+                virtual_body_complete = true;
+                return true;
+            }
+            send_size = static_cast<size_t>(std::min<uint64_t>(
+                static_cast<uint64_t>(count),
+                virtual_body_length - sent_body));
+        }
+        if (send_size > 0 && !SendAll(client, bytes, send_size)) return false;
+        sent_body += static_cast<uint64_t>(send_size);
+        if (finite_ts_body && sent_body >= virtual_body_length) {
+            virtual_body_complete = true;
+        }
+        return true;
+    };
+
+    if (!send_body_chunk(data.data(), static_cast<size_t>(first_got))) {
+        send_failed = true;
+    }
+
+    while (!send_failed && !virtual_body_complete && running_) {
         DWORD got = 0;
+        const auto readStart = std::chrono::steady_clock::now();
         const BOOL ok = ReadFile(process.stdout_read, data.data(),
                                  static_cast<DWORD>(data.size()), &got, nullptr);
+        const auto readMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - readStart).count();
+        if (readMs >= 80) {
+            AddLog("SERVER_PIPE_GAP mode=oneshot ms=" +
+                   std::to_string(readMs) +
+                   " bytes=" + std::to_string(got) +
+                   " sentBody=" + std::to_string(sent_body));
+        }
         if (!ok || got == 0) break;
-        if (!SendAll(client, data.data(), static_cast<size_t>(got))) {
+
+        const auto sendStart = std::chrono::steady_clock::now();
+        if (!send_body_chunk(data.data(), static_cast<size_t>(got))) {
             send_failed = true;
             break;
         }
-        sent_body += static_cast<uint64_t>(got);
+        const auto sendMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - sendStart).count();
+        if (sendMs >= 80) {
+            AddLog("SERVER_SEND_SLOW mode=oneshot ms=" +
+                   std::to_string(sendMs) +
+                   " bytes=" + std::to_string(got) +
+                   " sentBody=" + std::to_string(sent_body));
+        }
     }
 
-    if (send_failed || !running_) {
+    if (!send_failed && virtual_tail_duration_probe) {
+        if (tail_probe_body.size() == virtual_body_length) {
+            StoreGenericTailProbeCache(
+                generic_tail_probe_cache_key, tail_probe_body);
+            if (!SendAll(client, tail_probe_body.data(), tail_probe_body.size())) {
+                send_failed = true;
+            } else {
+                sent_body = static_cast<uint64_t>(tail_probe_body.size());
+                virtual_body_complete = true;
+                AddLog("GENERIC_SEEKABLE tail PCR probe returned actual EOF tail bytes=" +
+                       std::to_string(sent_body));
+            }
+        } else {
+            AddLog("GENERIC_SEEKABLE tail PCR probe ended short bytes=" +
+                   std::to_string(tail_probe_body.size()) +
+                   " expected=" + std::to_string(virtual_body_length));
+        }
+    }
+
+    if (!send_failed && !virtual_tail_duration_probe &&
+        finite_ts_body && sent_body < virtual_body_length) {
+        const int64_t remaining_ms = std::max<int64_t>(
+            0, item.duration_ms - requested_start_ms);
+        const auto elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - startup_begin).count();
+        const bool natural_eof_likely =
+            remaining_ms <= 0 || elapsed_ms + 2000 >= remaining_ms;
+        const uint64_t missing = virtual_body_length - sent_body;
+        if (natural_eof_likely &&
+            (missing % kMpegTsPacketSize) == 0) {
+            AddLog("GENERIC_SEEKABLE natural EOF padding MPEG-TS bytes=" +
+                   std::to_string(missing) +
+                   " elapsedMs=" + std::to_string(elapsed_ms) +
+                   " expectedPlaybackMs=" + std::to_string(remaining_ms));
+            if (SendMpegTsNullPadding(client, missing)) {
+                sent_body = virtual_body_length;
+                virtual_body_complete = true;
+            } else {
+                send_failed = true;
+            }
+        } else {
+            AddLog("GENERIC_SEEKABLE stream ended short; padding suppressed bytes=" +
+                   std::to_string(sent_body) +
+                   " expected=" + std::to_string(virtual_body_length) +
+                   " elapsedMs=" + std::to_string(elapsed_ms) +
+                   " expectedPlaybackMs=" + std::to_string(remaining_ms));
+        }
+    }
+
+    if (send_failed || !running_ || virtual_body_complete) {
         TerminateAiProcess(process);
     }
 
@@ -2101,6 +2834,9 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
     if (stderr_thread.joinable()) stderr_thread.join();
 
     AddLog("AI /media body sent=" + std::to_string(sent_body) +
+           (finite_ts_body
+               ? " expected=" + std::to_string(virtual_body_length)
+               : std::string{}) +
            " processExit=" + std::to_string(exit_code) +
            (send_failed ? " (client disconnected/send failed)" : ""));
 
@@ -2153,8 +2889,12 @@ std::string DlnaServer::AiOutputLabel() const {
 
 std::string DlnaServer::DlnaContentFeatures() const {
     if (ai_passthrough_) {
-        // Finite transcoded file: DLNA time seek is supported, byte-range seek is not.
-        return "DLNA.ORG_OP=10;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000";
+        if (g_r800zz_vrplayer_request) {
+            // Preserve the existing r800zzvrplayer contract: DLNA time seek only.
+            return "DLNA.ORG_OP=10;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000";
+        }
+        // Generic clients get the experimental virtual HTTP byte-range capability.
+        return "DLNA.ORG_OP=11;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000";
     }
     return "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
 }
@@ -2374,7 +3114,18 @@ std::string DlnaServer::BrowseSoapResponse(const std::string& object_id,
           << "<dc:title>" << XmlEscape(DisplayTitle(item)) << "</dc:title>"
           << "<upnp:class>object.item.videoItem.movie</upnp:class>"
           << "<res protocolInfo=\"" << XmlEscape(DlnaProtocolInfo(&item)) << "\"";
-        if (!ai_passthrough_) d << " size=\"" << item.size << "\"";
+        // For AI passthrough, generic fixed-muxrate MPEG-TS uses the same
+        // virtual size model as HEAD/GET/Range. r800zzvrplayer keeps its
+        // established stream-only metadata.
+        uint64_t advertisedSize = item.size;
+        if (ai_passthrough_ &&
+            ai_output_mode_ != AiOutputMode::WebmVp9Alpha) {
+            advertisedSize = RealtimeTsVirtualSizeBytes(item.duration_ms);
+        }
+        if (advertisedSize > 0 &&
+            (!ai_passthrough_ || !g_r800zz_vrplayer_request)) {
+            d << " size=\"" << advertisedSize << "\"";
+        }
         if (item.duration_ms > 0) {
             d << " duration=\"" << FormatDlnaDuration(item.duration_ms) << "\"";
         }
@@ -2436,3 +3187,4 @@ std::string DlnaServer::SimpleSoapResponse(const std::string& service,
         << "</s:Body></s:Envelope>";
     return xml.str();
 }
+

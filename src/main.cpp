@@ -32,6 +32,38 @@ static bool g_SwapChainOccluded = false;
 static UINT g_ResizeWidth = 0, g_ResizeHeight = 0;
 static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 
+struct DirectMlUiAdapter {
+    int index{-1};
+    UINT vendorId{0};
+    std::string name;
+};
+
+static std::vector<DirectMlUiAdapter> EnumerateDirectMlAdapters() {
+    std::vector<DirectMlUiAdapter> out;
+    IDXGIFactory1* factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return out;
+    for (UINT i = 0;; ++i) {
+        IDXGIAdapter1* adapter = nullptr;
+        const HRESULT hr = factory->EnumAdapters1(i, &adapter);
+        if (hr == DXGI_ERROR_NOT_FOUND) break;
+        if (FAILED(hr) || !adapter) continue;
+        DXGI_ADAPTER_DESC1 d{};
+        adapter->GetDesc1(&d);
+        if ((d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
+            const int len = WideCharToMultiByte(CP_UTF8, 0, d.Description, -1, nullptr, 0, nullptr, nullptr);
+            std::string name(len > 1 ? static_cast<size_t>(len - 1) : 0, '\0');
+            if (len > 1) {
+                WideCharToMultiByte(CP_UTF8, 0, d.Description, -1, name.data(), len, nullptr, nullptr);
+            }
+            out.push_back({static_cast<int>(i), d.VendorId, name});
+        }
+        adapter->Release();
+    }
+    factory->Release();
+    return out;
+}
+
+
 /*
 static float DrawTitleBarWebLink(const char* label, const wchar_t* url,
                                  const ImVec2& position) {
@@ -384,6 +416,19 @@ static std::string WideToUtf8(const std::wstring& value) {
     return result;
 }
 
+static std::wstring Utf8ToWide(const std::string& value) {
+    if (value.empty()) return {};
+    const int size = MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS,
+        value.data(), static_cast<int>(value.size()), nullptr, 0);
+    if (size <= 0) return {};
+    std::wstring result(static_cast<size_t>(size), L'\0');
+    MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS,
+        value.data(), static_cast<int>(value.size()), result.data(), size);
+    return result;
+}
+
 static constexpr const char* kLanguageCodes[] = {
     "en", "ru", "es", "th", "zh", "ko", "ja"
 };
@@ -408,6 +453,91 @@ static std::filesystem::path SettingsFilePath() {
     CoTaskMemFree(localAppData);
     return path / L"R800ZZ" / L"AI Passthrough DLNA Server" /
            L"settings.json";
+}
+
+static std::filesystem::path MediaSelectionFilePath() {
+    const std::filesystem::path settings = SettingsFilePath();
+    if (settings.empty()) return {};
+    return settings.parent_path() / L"media_selection.txt";
+}
+
+static bool SaveMediaSelection(
+        const std::filesystem::path& folder,
+        const std::vector<std::filesystem::path>& individualFiles) {
+    const std::filesystem::path path = MediaSelectionFilePath();
+    if (path.empty()) return false;
+
+    std::error_code filesystemError;
+    std::filesystem::create_directories(path.parent_path(), filesystemError);
+    if (filesystemError) return false;
+
+    std::filesystem::path temporary = path;
+    temporary += L".tmp";
+    {
+        std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+        if (!stream) return false;
+        if (!folder.empty()) {
+            stream << "F " << WideToUtf8(folder.wstring()) << "\n";
+        }
+        for (const auto& file : individualFiles) {
+            if (!file.empty()) {
+                stream << "I " << WideToUtf8(file.wstring()) << "\n";
+            }
+        }
+        stream.flush();
+        if (!stream) return false;
+    }
+
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    return true;
+}
+
+static void LoadMediaSelection(
+        std::filesystem::path& folder,
+        std::vector<std::filesystem::path>& individualFiles) {
+    folder.clear();
+    individualFiles.clear();
+
+    const std::filesystem::path path = MediaSelectionFilePath();
+    if (path.empty()) return;
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return;
+
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.size() < 3 || line[1] != ' ') continue;
+
+        const std::wstring widePath = Utf8ToWide(line.substr(2));
+        if (widePath.empty()) continue;
+        const std::filesystem::path candidate(widePath);
+
+        std::error_code filesystemError;
+        if (line[0] == 'F') {
+            if (folder.empty() &&
+                std::filesystem::is_directory(candidate, filesystemError) &&
+                !filesystemError) {
+                folder = candidate;
+            }
+        } else if (line[0] == 'I') {
+            if (std::filesystem::is_regular_file(candidate, filesystemError) &&
+                !filesystemError && DlnaServer::IsMediaFile(candidate)) {
+                const auto duplicate = std::find_if(
+                    individualFiles.begin(), individualFiles.end(),
+                    [&](const std::filesystem::path& existing) {
+                        return _wcsicmp(existing.wstring().c_str(),
+                                        candidate.wstring().c_str()) == 0;
+                    });
+                if (duplicate == individualFiles.end()) {
+                    individualFiles.push_back(candidate);
+                }
+            }
+        }
+    }
 }
 
 static int LoadUiLanguage() {
@@ -640,6 +770,12 @@ struct ConversionProcess {
                     ". The final output was not replaced. See log: " +
                     WideToUtf8(logFile.wstring());
         }
+        else{
+          //if convert OK then delete convert log file
+          std::error_code ec;
+          std::filesystem::remove(logFile, ec);
+          logFile.clear();
+        }
         return false;
     }
 
@@ -754,6 +890,25 @@ struct ConversionProcess {
 };
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+    HANDLE singleInstanceMutex = CreateMutexW(
+        nullptr,
+        TRUE,
+        L"Local\\R800ZZ_XR_DLNA_SERVER_SINGLE_INSTANCE");
+
+    if (!singleInstanceMutex) {
+        return 1;
+    }
+
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        MessageBoxW(
+            nullptr,
+            L"r800zzXRdlnaServer is already running.",
+            L"r800zzXRdlnaServer",
+            MB_OK | MB_ICONINFORMATION);
+        CloseHandle(singleInstanceMutex);
+        return 0;
+    }
+
     SetProcessDPIAware();
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
@@ -761,7 +916,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                    L"R800ZZDlnaServerWindow", nullptr};
     RegisterClassExW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName,
-                              L"r800zzXRdlnaServer 0.2",
+                              L"r800zzXRdlnaServer 0.3",
                               WS_OVERLAPPEDWINDOW, 100, 100, 820, 720,
                               nullptr, nullptr, wc.hInstance, nullptr);
 
@@ -820,6 +975,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     ImGuiStyle& style = ImGui::GetStyle();
     //const ImVec4 backgroundColor(241.0f / 255.0f, 204.0f / 255.0f, 165.0f / 255.0f, 1.0f); // #F1CCA5
     const ImVec4 backgroundColor(0xff / 250.0f, 0xef / 255.0f, 0xd5 / 255.0f, 1.0f);
+    const ImVec4 serverRunningBackgroundColor(
+        0xff / 255.0f, 0xc0 / 255.0f, 0xcb / 255.0f, 1.0f); // #FFC0CB
     style.Colors[ImGuiCol_WindowBg] = backgroundColor;
     // Sky-blue UI surfaces requested for the title bar, unchecked radio/
     // framed controls, and the log/list area.  Keep the main window color
@@ -878,15 +1035,43 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             if (duplicate == selected_files.end()) selected_files.push_back(file);
         }
     };
+    LoadMediaSelection(selected_folder, individually_selected_files);
+    if (!selected_folder.empty()) {
+        folder_files = DlnaServer::FindMediaFiles(selected_folder);
+    }
+    rebuildSelectedFiles();
     std::vector<std::string> addresses = DlnaServer::GetLocalIPv4Addresses();
     int selected_address = addresses.empty() ? -1 : 0;
     // 0=Alpha packed, 1=Alpha WebM VP9, 2=Chroma Key, 3=OFF.
     int ai_stream_mode = 3;
+    int ai_backend = 0; // 0=NVIDIA CUDA, 1=DirectML, 2=CPU
+    int previous_ai_backend = ai_backend;
+    auto directml_adapters = EnumerateDirectMlAdapters();
+    int directml_adapter_choice = directml_adapters.empty() ? -1 : 0;
+    int previous_directml_adapter_choice = directml_adapter_choice;
     auto aiPassthroughEnabled = [&]() { return ai_stream_mode != 3; };
     auto selectedAiOutputMode = [&]() {
         if (ai_stream_mode == 1) return AiOutputMode::WebmVp9Alpha;
         if (ai_stream_mode == 2) return AiOutputMode::ChromaKeyHevc;
         return AiOutputMode::AlphaPackedHevc;
+    };
+    auto selectedAiBackend = [&]() {
+        return ai_backend == 0 ? AiBackend::NvidiaCuda :
+            (ai_backend == 1 ? AiBackend::DirectML : AiBackend::Cpu);
+    };
+    auto selectedDirectMlDevice = [&]() {
+        return (ai_backend == 1 && directml_adapter_choice >= 0)
+            ? directml_adapters[static_cast<size_t>(directml_adapter_choice)].index
+            : 0;
+    };
+    auto refreshAiPrewarm = [&]() {
+        const AiBackend backend = selectedAiBackend();
+        const int device = selectedDirectMlDevice();
+        if (aiPassthroughEnabled() && !selected_files.empty()) {
+            server.SetAiPrewarm(true, selected_files.front(), backend, device);
+        } else {
+            server.SetAiPrewarm(false, {}, backend, device);
+        }
     };
     std::filesystem::path conversion_input;
     int conversion_mode = 0; // 0=Chroma Key, 1=WebM Alpha, 2=Alpha Packed
@@ -927,12 +1112,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             aiCapabilityChecked = true;
             aiCapabilityAvailable = result.available;
             aiCapabilityMessage = result.message;
-            ai_stream_mode = result.available ? 0 : 3;
+            // The probe is CUDA-specific. Do not force DirectML/CPU mode OFF
+            // if the user changed backend while the async probe was running.
+            if (ai_backend == 0) ai_stream_mode = result.available ? 0 : 3;
             server.RecordAiCapabilityResult(result);
-            if (result.available && !selected_files.empty()) {
-                server.SetAiPrewarm(true, selected_files.front());
-            }
+            refreshAiPrewarm();
         }
+
+        style.Colors[ImGuiCol_WindowBg] = server.IsRunning()
+            ? serverRunningBackgroundColor
+            : backgroundColor;
 
         ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
         ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
@@ -992,9 +1181,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         const bool conversionRunning = conversionProcess.IsRunning();
         if (!conversionRunning && conversionProcess.completed &&
             resume_prewarm_after_conversion) {
-            if (aiPassthroughEnabled() && !selected_files.empty()) {
-                server.SetAiPrewarm(true, selected_files.front());
-            }
+            refreshAiPrewarm();
             resume_prewarm_after_conversion = false;
         }
 
@@ -1004,11 +1191,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 selected_folder = path;
                 folder_files = DlnaServer::FindMediaFiles(selected_folder);
                 rebuildSelectedFiles();
-                if (aiPassthroughEnabled() && !server.IsRunning()) {
-                    server.SetAiPrewarm(
-                        true, selected_files.empty()
-                            ? std::filesystem::path{} : selected_files.front());
-                }
+                SaveMediaSelection(selected_folder, individually_selected_files);
+                if (!server.IsRunning()) refreshAiPrewarm();
             }
         }
         ImGui::SameLine();
@@ -1025,10 +1209,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             if (!path.empty() && DlnaServer::IsMediaFile(path)) {
                 individually_selected_files.push_back(path);
                 rebuildSelectedFiles();
-                if (aiPassthroughEnabled() && !server.IsRunning() &&
-                    !selected_files.empty()) {
-                    server.SetAiPrewarm(true, selected_files.front());
-                }
+                SaveMediaSelection(selected_folder, individually_selected_files);
+                if (!server.IsRunning()) refreshAiPrewarm();
             }
         }
         ImGui::SameLine();
@@ -1040,10 +1222,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             if (ImGui::SmallButton(uiText.clearFiles)) {
                 individually_selected_files.clear();
                 rebuildSelectedFiles();
-                if (aiPassthroughEnabled() && !server.IsRunning()) {
-                    if (selected_files.empty()) server.SetAiPrewarm(false, {});
-                    else server.SetAiPrewarm(true, selected_files.front());
-                }
+                SaveMediaSelection(selected_folder, individually_selected_files);
+                if (!server.IsRunning()) refreshAiPrewarm();
             }
             for (const auto& file : individually_selected_files) {
                 ImGui::TextWrapped("  Individual: %s",
@@ -1096,10 +1276,42 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         }
 
         ImGui::Spacing();
+        ImGui::TextUnformatted("AI Backend:");
+        const char* backendItems[] = {"NVIDIA CUDA", "DirectML", "CPU"};
+        ImGui::SetNextItemWidth(260.0f);
+        ImGui::Combo("##ai_backend", &ai_backend, backendItems, 3);
+
+        if (ai_backend == 1) {
+            if (directml_adapters.empty()) {
+                ImGui::TextDisabled("No hardware DXGI adapters found");
+            } else {
+                directml_adapter_choice = std::clamp(
+                    directml_adapter_choice, 0, static_cast<int>(directml_adapters.size()) - 1);
+                const auto& current = directml_adapters[static_cast<size_t>(directml_adapter_choice)];
+                ImGui::SetNextItemWidth(360.0f);
+                if (ImGui::BeginCombo("DirectML Device", current.name.c_str())) {
+                    for (int i = 0; i < static_cast<int>(directml_adapters.size()); ++i) {
+                        const bool selected = i == directml_adapter_choice;
+                        const std::string label = "[" + std::to_string(directml_adapters[i].index) + "] " + directml_adapters[i].name;
+                        if (ImGui::Selectable(label.c_str(), selected)) directml_adapter_choice = i;
+                        if (selected) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+            }
+        }
+
+        if (ai_backend != previous_ai_backend ||
+            directml_adapter_choice != previous_directml_adapter_choice) {
+            refreshAiPrewarm();
+            previous_ai_backend = ai_backend;
+            previous_directml_adapter_choice = directml_adapter_choice;
+        }
+
         ImGui::TextUnformatted(uiText.aiMode);
         const int previousAiStreamMode = ai_stream_mode;
         const bool aiChoicesDisabled = server.IsRunning() ||
-            !aiCapabilityChecked || !aiCapabilityAvailable;
+            (ai_backend == 0 && (!aiCapabilityChecked || !aiCapabilityAvailable));
         if (aiChoicesDisabled) ImGui::BeginDisabled();
         ImGui::RadioButton("Alpha packed", &ai_stream_mode, 0);
         ImGui::SameLine();
@@ -1113,13 +1325,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (server.IsRunning()) ImGui::EndDisabled();
 
         if (ai_stream_mode != previousAiStreamMode && !server.IsRunning()) {
-            if (aiPassthroughEnabled()) {
-                server.SetAiPrewarm(
-                    true, selected_files.empty()
-                        ? std::filesystem::path{} : selected_files.front());
-            } else {
-                server.SetAiPrewarm(false, {});
-            }
+            refreshAiPrewarm();
         }
 
         if (!aiCapabilityChecked) {
@@ -1142,6 +1348,55 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         }
 
         ImGui::Spacing();
+        if (!server.IsRunning()) {
+          const bool backendReady =
+            ai_backend == 0
+                ? aiCapabilityChecked
+                : (ai_backend == 1 ? directml_adapter_choice >= 0 : true);
+          const bool can_start = backendReady &&
+            !selected_files.empty() && selected_address >= 0 && !conversionRunning;
+
+            if (!can_start) ImGui::BeginDisabled();
+            ImGui::PushStyleColor(ImGuiCol_Button,
+                ImVec4(255.0f / 255.0f, 192.0f / 255.0f, 203.0f / 255.0f, 1.0f)); // #FFC0CB
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                ImVec4(255.0f / 255.0f, 205.0f / 255.0f, 214.0f / 255.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                ImVec4(245.0f / 255.0f, 170.0f / 255.0f, 184.0f / 255.0f, 1.0f));
+            if (ImGui::Button(uiText.startServer, ImVec2(180, 0))) {
+                const bool aiEnabled = aiPassthroughEnabled();
+                server.Start(
+                    selected_files,
+                    addresses[static_cast<size_t>(selected_address)],
+                    aiEnabled,
+                    selectedAiOutputMode(),
+                    selectedAiBackend(),
+                    selectedDirectMlDevice());
+            }
+            ImGui::PopStyleColor(3);
+            if (!can_start) ImGui::EndDisabled();
+        } else {
+          ImGui::PushStyleColor(ImGuiCol_Button, backgroundColor);
+          ImGui::PushStyleColor(
+           ImGuiCol_ButtonHovered,
+           ImVec4(1.0f, 0.90f, 0.70f, 1.0f));
+          ImGui::PushStyleColor( ImGuiCol_ButtonActive, ImVec4(1.0f, 0.84f, 0.58f, 1.0f));
+
+          if (ImGui::Button(uiText.stopServer, ImVec2(180, 0))) {
+            server.Stop();
+          }
+          ImGui::PopStyleColor(3);
+        }
+
+        ImGui::SameLine();
+        ImGui::Text("%s: %s", uiText.status, server.Status().c_str());
+
+        if (server.IsRunning()) {
+            ImGui::Text("DLNA name: r800zzXRdlnaServer");
+            ImGui::Text("HTTP: http://%s:%u/media/<id>", server.AdvertisedIp().c_str(), server.Port());
+            ImGui::TextWrapped("%s", uiText.firewall);
+        }
+
         ImGui::SeparatorText(uiText.convertSection);
         if (conversionRunning) ImGui::BeginDisabled();
         if (ImGui::Button(uiText.selectInput)) {
@@ -1183,17 +1438,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                         : AiOutputMode::AlphaPackedHevc);
                 const auto output = SelectConversionOutput(hwnd, conversion_input, mode);
                 if (!output.empty()) {
-                    if (aiCapabilityAvailable && aiPassthroughEnabled()) {
-                        server.SetAiPrewarm(false, {});
+                    if (aiPassthroughEnabled()) {
+                        server.SetAiPrewarm(
+                            false, {}, selectedAiBackend(), selectedDirectMlDevice());
                         resume_prewarm_after_conversion = true;
                     }
                     if (!conversionProcess.Start(
                             conversion_input, output, mode,
                             aiCapabilityAvailable) &&
                         resume_prewarm_after_conversion) {
-                        if (!selected_files.empty()) {
-                            server.SetAiPrewarm(true, selected_files.front());
-                        }
+                        refreshAiPrewarm();
                         resume_prewarm_after_conversion = false;
                     }
                 }
@@ -1238,34 +1492,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 WideToUtf8(conversionProcess.logFile.wstring()).c_str());
         }
 
-        ImGui::Spacing();
-        if (!server.IsRunning()) {
-            const bool can_start = aiCapabilityChecked &&
-                !selected_files.empty() && selected_address >= 0 &&
-                !conversionRunning;
-            if (!can_start) ImGui::BeginDisabled();
-            if (ImGui::Button(uiText.startServer, ImVec2(180, 0))) {
-                const bool aiEnabled = aiPassthroughEnabled();
-                server.Start(
-                    selected_files,
-                    addresses[static_cast<size_t>(selected_address)],
-                    aiEnabled,
-                    selectedAiOutputMode());
-            }
-            if (!can_start) ImGui::EndDisabled();
-        } else {
-            if (ImGui::Button(uiText.stopServer, ImVec2(180, 0))) server.Stop();
-        }
-
-        ImGui::SameLine();
-        ImGui::Text("%s: %s", uiText.status, server.Status().c_str());
-
-        if (server.IsRunning()) {
-            ImGui::Text("DLNA name: r800zzXRdlnaServer");
-            ImGui::Text("HTTP: http://%s:%u/media/<id>", server.AdvertisedIp().c_str(), server.Port());
-            ImGui::TextWrapped("%s", uiText.firewall);
-        }
-
         ImGui::SeparatorText(uiText.log);
         const auto log_lines = server.Logs();
         std::string log_text;
@@ -1291,8 +1517,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         ImGui::End();
 
         ImGui::Render();
+        const ImVec4 clearColor = server.IsRunning()
+            ? serverRunningBackgroundColor
+            : ImVec4(241.0f / 255.0f, 204.0f / 255.0f,
+                     165.0f / 255.0f, 1.0f);
         const float clear_color[4] = {
-            241.0f / 255.0f, 204.0f / 255.0f, 165.0f / 255.0f, 1.0f
+            clearColor.x, clearColor.y, clearColor.z, clearColor.w
         };
         g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
@@ -1312,5 +1542,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     DestroyWindow(hwnd);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
     if (SUCCEEDED(comResult)) CoUninitialize();
+    ReleaseMutex(singleInstanceMutex);
+    CloseHandle(singleInstanceMutex);
     return 0;
 }
+

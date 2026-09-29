@@ -1,4 +1,5 @@
 #include "cuda_kernels.h"
+#include "r800zz_dml_backend.h"
 #include "cpu_converter.h"
 #include "rvm_ort.h"
 #include "simple_video_player.h"
@@ -46,6 +47,10 @@ namespace {
 
 constexpr float kPackScale = 0.4f;
 constexpr double kDropLagSeconds = 0.120;
+// Realtime MPEG-TS uses a fixed transport rate so byte offsets can be mapped
+// to playback time consistently by the DLNA server. Keep this in sync with
+// the server-side virtual-size calculation.
+constexpr int64_t kRealtimeTsMuxRateBitsPerSecond = 100000000;
 
 std::string fferr(int code) {
     char buf[AV_ERROR_MAX_STRING_SIZE]{};
@@ -1198,6 +1203,10 @@ struct Pipeline {
             av_dict_set(&muxOpts, "muxdelay", "0", 0);
             av_dict_set(&muxOpts, "muxpreload", "0", 0);
             av_dict_set(&muxOpts, "mpegts_flags", "resend_headers", 0);
+            const std::string tsMuxRate =
+                std::to_string(kRealtimeTsMuxRateBitsPerSecond);
+            av_dict_set(&muxOpts, "muxrate", tsMuxRate.c_str(), 0);
+            logLine("MPEG-TS constant muxrate=" + tsMuxRate + " bit/s");
         } else if (!webmAlphaOutput) {
             av_dict_set(&muxOpts, "movflags", "+faststart", 0);
         }
@@ -1918,6 +1927,20 @@ struct Pipeline {
 } // namespace
 
 int main(int argc, char** argv) {
+    // One worker executable for every backend. CUDA keeps its existing path
+    // unchanged; DirectML/CPU are dispatched before CUDA initialization.
+    if (argc == 2 && std::string(argv[1]) == "--list-devices") {
+        return RunR800zzDmlBackend(argc, argv);
+    }
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (std::string(argv[i]) == "--backend") {
+            const std::string backend(argv[i + 1]);
+            if (backend == "dml" || backend == "cpu") {
+                return RunR800zzDmlBackend(argc, argv);
+            }
+            break;
+        }
+    }
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
     av_log_set_level(AV_LOG_ERROR);
@@ -2020,47 +2043,34 @@ int main(int argc, char** argv) {
     }
 
     if (args.resident) {
-        // Create the CUDA/ORT session once and execute one warm-up inference.
-        // RUN commands reuse that session, while each request still gets fresh
-        // demuxer, decoder, encoder and muxer state.
-        Pipeline warm;
-        warm.args = args;
-        std::string error;
-        // FFmpeg's primary CUDA context must be created first. It selects
-        // CU_CTX_SCHED_BLOCKING_SYNC; creating ORT/CUDA first activates the
-        // primary context with incompatible flags and makes later NVDEC fail.
-        if (!warm.initInput(error) || !warm.initCudaDecoder(error) ||
-            !warm.initRvm(error)) {
-            logLine("RESIDENT_ERROR init: " + error);
-            return 20;
-        }
+        // One long-lived worker process accepts CUDA / DirectML / CPU per RUN.
+        // Backend resources may be released/re-created when the requested mode
+        // changes, but the r800zz_ai_worker.exe process itself stays resident.
+        enum class ResidentBackend {
+            None,
+            Cuda,
+            DirectML,
+            Cpu,
+        };
 
-        if (cudaMemsetAsync(warm.rvmInput, 0, warm.rvmInputBytes,
-                            warm.cudaStream) != cudaSuccess) {
-            logLine("RESIDENT_ERROR warmup cudaMemset failed");
-            return 21;
-        }
-        RvmGpuOutput warmOutput{};
-        logLine("resident RVM warmup start");
-        if (!warm.rvm->run(warm.rvmInput, warm.cudaStream, warmOutput, error)) {
-            logLine("RESIDENT_ERROR warmup: " + error);
-            return 22;
-        }
-        if (!warm.rvm->resetState(warm.cudaStream, error)) {
-            logLine("RESIDENT_ERROR reset after warmup: " + error);
-            return 23;
-        }
-        logLine("resident RVM warmup complete");
+        const auto executableDir = []() {
+            wchar_t path[MAX_PATH]{};
+            GetModuleFileNameW(nullptr, path, MAX_PATH);
+            return std::filesystem::path(path).parent_path();
+        }();
+        const std::filesystem::path cudaModel =
+            executableDir / L"rvm_mobilenetv3_fp16.onnx";
+        const std::filesystem::path dmlModel =
+            executableDir / L"rvm_mobilenetv3_fp32.onnx";
 
-        std::unique_ptr<RvmOrtGpu> residentRvm = std::move(warm.ownedRvm);
-        AVBufferRef* residentCudaDevice = warm.cudaDevice;
-        cudaStream_t residentStream = warm.cudaStream;
-        warm.rvm = nullptr;
-        warm.cudaDevice = nullptr;
-        warm.cudaStream = nullptr;
-        warm.ownsCudaStream = false;
-        warm.cleanup();
-        logLine("RESIDENT_READY");
+        ResidentBackend residentBackend = ResidentBackend::None;
+        int residentDevice = -1;
+        std::filesystem::path residentInput;
+
+        std::unique_ptr<RvmOrtGpu> residentCudaRvm;
+        AVBufferRef* residentCudaDevice = nullptr;
+        cudaStream_t residentCudaStream = nullptr;
+        R800zzDmlResidentSession* residentDmlSession = nullptr;
 
         std::atomic<bool> cancelStream{false};
         std::thread streamThread;
@@ -2072,20 +2082,246 @@ int main(int argc, char** argv) {
             cancelStream.store(false);
         };
 
+        auto releaseBackend = [&]() {
+            stopCurrentStream();
+            residentCudaRvm.reset();
+            if (residentCudaStream) {
+                cudaStreamDestroy(residentCudaStream);
+                residentCudaStream = nullptr;
+            }
+            if (residentCudaDevice) {
+                av_buffer_unref(&residentCudaDevice);
+            }
+            if (residentDmlSession) {
+                R800zzDestroyDmlResidentSession(residentDmlSession);
+                residentDmlSession = nullptr;
+            }
+            residentBackend = ResidentBackend::None;
+            residentDevice = -1;
+            residentInput.clear();
+        };
+
+        auto parseBackend = [](const std::string& name, ResidentBackend& backend) {
+            if (name == "cuda") {
+                backend = ResidentBackend::Cuda;
+                return true;
+            }
+            if (name == "dml") {
+                backend = ResidentBackend::DirectML;
+                return true;
+            }
+            if (name == "cpu") {
+                backend = ResidentBackend::Cpu;
+                return true;
+            }
+            return false;
+        };
+
+        auto backendName = [](ResidentBackend backend) -> const char* {
+            switch (backend) {
+            case ResidentBackend::Cuda: return "cuda";
+            case ResidentBackend::DirectML: return "dml";
+            case ResidentBackend::Cpu: return "cpu";
+            default: return "none";
+            }
+        };
+
+        auto prepareBackend = [&](ResidentBackend requestedBackend,
+                                  int requestedDevice,
+                                  const std::filesystem::path& input,
+                                  std::string& error) -> bool {
+            error.clear();
+            const int normalizedDevice =
+                requestedBackend == ResidentBackend::Cuda ? requestedDevice :
+                (requestedBackend == ResidentBackend::DirectML ? requestedDevice : -1);
+
+            if (residentBackend == requestedBackend &&
+                residentDevice == normalizedDevice &&
+                residentInput == input) {
+                return true;
+            }
+
+            releaseBackend();
+
+            if (!std::filesystem::is_regular_file(input)) {
+                error = "input not found: " + input.u8string();
+                return false;
+            }
+
+            if (requestedBackend == ResidentBackend::Cuda) {
+                if (!std::filesystem::is_regular_file(cudaModel)) {
+                    error = "CUDA model not found: " + cudaModel.u8string();
+                    return false;
+                }
+
+                Args warmArgs = args;
+                warmArgs.input = input;
+                warmArgs.model = cudaModel;
+                warmArgs.device = std::max(0, requestedDevice);
+                warmArgs.resident = false;
+                warmArgs.previewOnly = false;
+                warmArgs.offlineConvert = false;
+                warmArgs.noPreview = true;
+
+                Pipeline warm;
+                warm.args = warmArgs;
+                // FFmpeg establishes the CUDA primary context before ORT.
+                if (!warm.initInput(error) ||
+                    !warm.initCudaDecoder(error) ||
+                    !warm.initRvm(error)) {
+                    return false;
+                }
+
+                if (cudaMemsetAsync(
+                        warm.rvmInput, 0, warm.rvmInputBytes,
+                        warm.cudaStream) != cudaSuccess) {
+                    error = "warmup cudaMemset failed";
+                    return false;
+                }
+                RvmGpuOutput warmOutput{};
+                logLine("resident RVM warmup start backend=cuda");
+                if (!warm.rvm->run(
+                        warm.rvmInput, warm.cudaStream,
+                        warmOutput, error)) {
+                    return false;
+                }
+                if (!warm.rvm->resetState(warm.cudaStream, error)) {
+                    return false;
+                }
+                logLine("resident RVM warmup complete backend=cuda");
+
+                residentCudaRvm = std::move(warm.ownedRvm);
+                residentCudaDevice = warm.cudaDevice;
+                residentCudaStream = warm.cudaStream;
+                warm.rvm = nullptr;
+                warm.cudaDevice = nullptr;
+                warm.cudaStream = nullptr;
+                warm.ownsCudaStream = false;
+                warm.cleanup();
+            } else {
+                if (!std::filesystem::is_regular_file(dmlModel)) {
+                    error = "DirectML/CPU model not found: " + dmlModel.u8string();
+                    return false;
+                }
+                residentDmlSession = R800zzCreateDmlResidentSession(
+                    input, dmlModel,
+                    requestedBackend == ResidentBackend::DirectML,
+                    normalizedDevice, args.qp,
+                    args.downsample > 0.0f ? args.downsample : 0.25f,
+                    error);
+                if (!residentDmlSession) {
+                    return false;
+                }
+            }
+
+            residentBackend = requestedBackend;
+            residentDevice = normalizedDevice;
+            residentInput = input;
+            logLine(
+                std::string("RESIDENT_READY backend=") +
+                backendName(residentBackend) +
+                " device=" + std::to_string(residentDevice));
+            return true;
+        };
+
+        auto decodeInput = [&](const std::string& inputHex,
+                               std::filesystem::path& input,
+                               std::string& error) -> bool {
+            input = args.input;
+            if (inputHex.empty()) return true;
+            std::string inputUtf8;
+            if (!decodeHex(inputHex, inputUtf8)) {
+                error = "invalid input path encoding";
+                return false;
+            }
+            input = std::filesystem::u8path(inputUtf8);
+            if (!std::filesystem::is_regular_file(input)) {
+                error = "input not found: " + inputUtf8;
+                return false;
+            }
+            return true;
+        };
+
+        auto openOutputPipe = [&](const std::string& pipeName) -> HANDLE {
+            const auto connectBegin = std::chrono::steady_clock::now();
+            while (!cancelStream.load()) {
+                HANDLE output = CreateFileA(
+                    pipeName.c_str(), GENERIC_WRITE, 0, nullptr,
+                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (output != INVALID_HANDLE_VALUE) return output;
+                const DWORD win32 = GetLastError();
+                if (win32 != ERROR_PIPE_BUSY && win32 != ERROR_FILE_NOT_FOUND) {
+                    logLine("RESIDENT_STREAM_ERROR open output pipe Win32=" +
+                            std::to_string(win32));
+                    return INVALID_HANDLE_VALUE;
+                }
+                if (std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::steady_clock::now() -
+                        connectBegin).count() >= 120) {
+                    logLine("RESIDENT_STREAM_ERROR output pipe timeout");
+                    return INVALID_HANDLE_VALUE;
+                }
+                WaitNamedPipeA(pipeName.c_str(), 50);
+            }
+            return INVALID_HANDLE_VALUE;
+        };
+
+        logLine("RESIDENT_CONTROLLER_READY");
+
         std::string command;
         while (std::getline(std::cin, command)) {
-            if (!command.empty() && command.back() == '\r') command.pop_back();
+            if (!command.empty() && command.back() == '\r') {
+                command.pop_back();
+            }
+
             if (command == "QUIT") {
-                stopCurrentStream();
+                releaseBackend();
                 break;
             }
+            if (command == "IDLE") {
+                stopCurrentStream();
+                activeRequestId = 0;
+                logLine("RESIDENT_IDLE");
+                continue;
+            }
             if (command.rfind("CANCEL ", 0) == 0) {
-                char* end = nullptr;
+                char* endNumber = nullptr;
                 const unsigned long long requestId =
-                    std::strtoull(command.c_str() + 7, &end, 10);
-                if (end != command.c_str() + 7 && requestId == activeRequestId) {
+                    std::strtoull(command.c_str() + 7, &endNumber, 10);
+                if (endNumber != command.c_str() + 7 &&
+                    requestId == activeRequestId) {
                     stopCurrentStream();
                     activeRequestId = 0;
+                }
+                continue;
+            }
+
+            if (command.rfind("PREPARE ", 0) == 0) {
+                std::istringstream parser(command);
+                std::string verb;
+                std::string backendText;
+                int requestedDevice = -1;
+                std::string inputHex;
+                parser >> verb >> backendText >> requestedDevice >> inputHex;
+
+                ResidentBackend requestedBackend = ResidentBackend::None;
+                std::filesystem::path requestedInput;
+                std::string error;
+                if (verb != "PREPARE" ||
+                    !parseBackend(backendText, requestedBackend) ||
+                    !decodeInput(inputHex, requestedInput, error)) {
+                    logLine("RESIDENT_ERROR prepare: " +
+                            (error.empty() ? command : error));
+                    continue;
+                }
+
+                stopCurrentStream();
+                activeRequestId = 0;
+                if (!prepareBackend(
+                        requestedBackend, requestedDevice,
+                        requestedInput, error)) {
+                    logLine("RESIDENT_ERROR prepare backend=" +
+                            backendText + ": " + error);
                 }
                 continue;
             }
@@ -2094,99 +2330,121 @@ int main(int argc, char** argv) {
             std::string verb;
             unsigned long long requestId = 0;
             long long requestedMs = 0;
+            std::string backendText;
+            int requestedDevice = -1;
             std::string outputMode;
             std::string pipeName;
             std::string inputHex;
-            parser >> verb >> requestId >> requestedMs >> outputMode >> pipeName >> inputHex;
-            if (verb != "RUN" || requestId == 0 || pipeName.empty() ||
-                (outputMode != "alpha-packed" && outputMode != "webm-alpha" &&
+            parser >> verb >> requestId >> requestedMs >>
+                backendText >> requestedDevice >>
+                outputMode >> pipeName >> inputHex;
+
+            ResidentBackend requestedBackend = ResidentBackend::None;
+            if (verb != "RUN" ||
+                requestId == 0 ||
+                !parseBackend(backendText, requestedBackend) ||
+                pipeName.empty() ||
+                (outputMode != "alpha-packed" &&
+                 outputMode != "webm-alpha" &&
                  outputMode != "chroma-key")) {
                 logLine("RESIDENT_ERROR unknown command=" + command);
                 continue;
             }
 
-            std::filesystem::path streamInput = args.input;
-            if (!inputHex.empty()) {
-                std::string inputUtf8;
-                if (!decodeHex(inputHex, inputUtf8)) {
-                    logLine("RESIDENT_ERROR invalid input path encoding");
-                    continue;
-                }
-                streamInput = std::filesystem::u8path(inputUtf8);
-                if (!std::filesystem::is_regular_file(streamInput)) {
-                    logLine("RESIDENT_ERROR input not found: " + inputUtf8);
-                    continue;
-                }
+            std::filesystem::path streamInput;
+            std::string prepareError;
+            if (!decodeInput(inputHex, streamInput, prepareError)) {
+                logLine("RESIDENT_STREAM_ERROR id=" +
+                        std::to_string(requestId) + " " + prepareError);
+                HANDLE output = openOutputPipe(pipeName);
+                if (output != INVALID_HANDLE_VALUE) CloseHandle(output);
+                continue;
             }
 
             stopCurrentStream();
             activeRequestId = requestId;
-            const int64_t startMs = std::max<long long>(0, requestedMs);
-            streamThread = std::thread([&, startMs, outputMode, pipeName, streamInput, requestId]() {
-                HANDLE output = INVALID_HANDLE_VALUE;
-                const auto connectBegin = std::chrono::steady_clock::now();
-                while (!cancelStream.load()) {
-                    output = CreateFileA(
-                        pipeName.c_str(), GENERIC_WRITE, 0, nullptr,
-                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-                    if (output != INVALID_HANDLE_VALUE) break;
-                    const DWORD win32 = GetLastError();
-                    if (win32 != ERROR_PIPE_BUSY && win32 != ERROR_FILE_NOT_FOUND) {
-                        logLine("RESIDENT_STREAM_ERROR open output pipe Win32=" +
-                                std::to_string(win32));
-                        return;
-                    }
-                    if (std::chrono::duration_cast<std::chrono::seconds>(
-                            std::chrono::steady_clock::now() - connectBegin).count() >= 120) {
-                        logLine("RESIDENT_STREAM_ERROR output pipe timeout");
-                        return;
-                    }
-                    WaitNamedPipeA(pipeName.c_str(), 50);
-                }
-                if (output == INVALID_HANDLE_VALUE) return;
 
-                int streamCode = 0;
-                {
-                    Pipeline p;
-                    p.args = args;
-                    p.args.input = streamInput;
-                    p.args.resident = false;
-                    p.args.previewOnly = false;
-                    p.args.startMs = startMs;
-                    if (outputMode == "webm-alpha") {
-                        p.args.outputMode = Args::OutputMode::WebmVp9Alpha;
-                    } else if (outputMode == "chroma-key") {
-                        p.args.outputMode = Args::OutputMode::ChromaKey;
-                    } else {
-                        p.args.outputMode = Args::OutputMode::AlphaPacked;
-                    }
-                    p.externalRvm = residentRvm.get();
-                    p.externalCudaDevice = residentCudaDevice;
-                    p.externalCudaStream = residentStream;
-                    p.outputHandle = output;
-                    p.cancelFlag = &cancelStream;
+            if (!prepareBackend(
+                    requestedBackend, requestedDevice,
+                    streamInput, prepareError)) {
+                logLine("RESIDENT_STREAM_ERROR id=" +
+                        std::to_string(requestId) +
+                        " prepare backend=" + backendText +
+                        ": " + prepareError);
+                HANDLE output = openOutputPipe(pipeName);
+                if (output != INVALID_HANDLE_VALUE) CloseHandle(output);
+                activeRequestId = 0;
+                continue;
+            }
 
+            const int64_t startMs =
+                std::max<long long>(0, requestedMs);
+            streamThread = std::thread(
+                [&, startMs, outputMode, pipeName,
+                 streamInput, requestId, requestedBackend]() {
+                    HANDLE output = openOutputPipe(pipeName);
+                    if (output == INVALID_HANDLE_VALUE) return;
+
+                    int streamCode = 0;
                     std::string runError;
-                    if (!p.initInput(runError) || !p.initCudaDecoder(runError) ||
-                        !p.initRvm(runError) || !p.initEncoderAndMuxer(runError) ||
-                        !p.initPreview(runError)) {
-                        logLine("ERROR resident stream init: " + runError);
-                        streamCode = 10;
-                    } else if (!p.run(runError)) {
-                        logLine("ERROR resident stream run: " + runError);
-                        streamCode = 11;
+                    if (requestedBackend == ResidentBackend::Cuda) {
+                        Pipeline p;
+                        p.args = args;
+                        p.args.input = streamInput;
+                        p.args.model = cudaModel;
+                        p.args.device = std::max(0, residentDevice);
+                        p.args.resident = false;
+                        p.args.previewOnly = false;
+                        p.args.offlineConvert = false;
+                        p.args.startMs = startMs;
+                        if (outputMode == "webm-alpha") {
+                            p.args.outputMode =
+                                Args::OutputMode::WebmVp9Alpha;
+                        } else if (outputMode == "chroma-key") {
+                            p.args.outputMode =
+                                Args::OutputMode::ChromaKey;
+                        } else {
+                            p.args.outputMode =
+                                Args::OutputMode::AlphaPacked;
+                        }
+                        p.externalRvm = residentCudaRvm.get();
+                        p.externalCudaDevice = residentCudaDevice;
+                        p.externalCudaStream = residentCudaStream;
+                        p.outputHandle = output;
+                        p.cancelFlag = &cancelStream;
+
+                        if (!p.initInput(runError) ||
+                            !p.initCudaDecoder(runError) ||
+                            !p.initRvm(runError) ||
+                            !p.initEncoderAndMuxer(runError) ||
+                            !p.initPreview(runError)) {
+                            streamCode = 10;
+                        } else if (!p.run(runError)) {
+                            streamCode = 11;
+                        }
+                    } else {
+                        streamCode = R800zzRunDmlResidentStream(
+                            residentDmlSession, streamInput,
+                            startMs, outputMode, output,
+                            &cancelStream, runError);
                     }
-                }
-                CloseHandle(output);
-                logLine("RESIDENT_STREAM_DONE id=" + std::to_string(requestId) +
-                        " code=" + std::to_string(streamCode));
-            });
+
+                    if (streamCode != 0 && !runError.empty()) {
+                        logLine("RESIDENT_STREAM_ERROR id=" +
+                                std::to_string(requestId) +
+                                " backend=" + backendName(requestedBackend) +
+                                " " + runError);
+                    }
+                    CloseHandle(output);
+                    logLine("RESIDENT_STREAM_DONE id=" +
+                            std::to_string(requestId) +
+                            " backend=" + backendName(requestedBackend) +
+                            " code=" + std::to_string(streamCode));
+                });
         }
 
         stopCurrentStream();
-        residentRvm.reset();
-        if (residentStream) cudaStreamDestroy(residentStream);
-        if (residentCudaDevice) av_buffer_unref(&residentCudaDevice);
+        releaseBackend();
         logLine("RESIDENT_EXIT");
         return 0;
     }
@@ -2219,3 +2477,4 @@ int main(int argc, char** argv) {
     logLine("completed");
     return 0;
 }
+
