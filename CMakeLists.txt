@@ -19,7 +19,14 @@ if(NOT FFMPEG_ROOT OR NOT EXISTS "${FFMPEG_ROOT}/include/libavformat/avformat.h"
     message(FATAL_ERROR "Set FFMPEG_ROOT to the extracted FFmpeg shared development package. Run setup_dependencies.bat first.")
 endif()
 if(NOT ONNXRUNTIME_ROOT OR NOT EXISTS "${ONNXRUNTIME_ROOT}/include/onnxruntime_cxx_api.h")
-    message(FATAL_ERROR "Set ONNXRUNTIME_ROOT to the extracted ONNX Runtime GPU package. Run setup_dependencies.bat first.")
+    message(FATAL_ERROR "Set ONNXRUNTIME_ROOT to the unified CUDA+DirectML ONNX Runtime root.")
+endif()
+if(EXISTS "${ONNXRUNTIME_ROOT}/include/dml_provider_factory.h")
+    set(ONNXRUNTIME_DML_INCLUDE "${ONNXRUNTIME_ROOT}/include")
+elseif(EXISTS "${ONNXRUNTIME_ROOT}/include/onnxruntime/core/providers/dml/dml_provider_factory.h")
+    set(ONNXRUNTIME_DML_INCLUDE "${ONNXRUNTIME_ROOT}/include/onnxruntime/core/providers/dml")
+else()
+    message(FATAL_ERROR "ONNXRUNTIME_ROOT has no DirectML provider header. Use one ONNX Runtime build containing both CUDA and DirectML EPs; the dedicated DML worker is no longer supported.")
 endif()
 
 find_package(CUDAToolkit REQUIRED)
@@ -64,6 +71,10 @@ target_link_libraries(r800zz_dlna_server PRIVATE
 add_executable(r800zz_ai_worker
     resources/app.rc
     src/r800zz_ai_worker.cpp
+    src/r800zz_dml_backend.cpp
+    src/r800zz_dml_backend.h
+    src/rvm_ort_dml.cpp
+    src/rvm_ort_dml.h
     src/cpu_converter.cpp
     src/cpu_converter.h
     src/simple_video_player.cpp
@@ -83,6 +94,7 @@ target_include_directories(r800zz_ai_worker PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${FFMPEG_ROOT}/include
     ${ONNXRUNTIME_ROOT}/include
+    ${ONNXRUNTIME_DML_INCLUDE}
 )
 
 target_compile_definitions(r800zz_ai_worker PRIVATE
@@ -99,7 +111,10 @@ find_library(AVCODEC_LIB avcodec PATHS "${FFMPEG_ROOT}/lib" NO_DEFAULT_PATH REQU
 find_library(AVUTIL_LIB avutil PATHS "${FFMPEG_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
 find_library(SWRESAMPLE_LIB swresample PATHS "${FFMPEG_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
 find_library(SWSCALE_LIB swscale PATHS "${FFMPEG_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
-find_library(ONNXRUNTIME_LIB onnxruntime PATHS "${ONNXRUNTIME_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
+set(ONNXRUNTIME_LIB "${ONNXRUNTIME_ROOT}/lib/onnxruntime.lib")
+if(NOT EXISTS "${ONNXRUNTIME_LIB}")
+    message(FATAL_ERROR "Unified ONNX Runtime import library is missing: ${ONNXRUNTIME_LIB}")
+endif()
 
 target_link_libraries(r800zz_dlna_server PRIVATE
     ${AVFORMAT_LIB}
@@ -114,6 +129,10 @@ target_link_libraries(r800zz_ai_worker PRIVATE
     ${SWSCALE_LIB}
     ${ONNXRUNTIME_LIB}
     CUDA::cudart
+    d3d11
+    d3d12
+    dxgi
+    d3dcompiler
     user32
     gdi32
     comctl32
@@ -146,6 +165,13 @@ set(ORT_DLLS
     "${ONNXRUNTIME_ROOT}/lib/onnxruntime_providers_shared.dll"
     "${ONNXRUNTIME_ROOT}/lib/onnxruntime_providers_cuda.dll"
 )
+file(GLOB ORT_DML_RUNTIME_DLLS
+    "${ONNXRUNTIME_ROOT}/lib/DirectML.dll"
+    "${ONNXRUNTIME_ROOT}/bin/DirectML.dll"
+    "${ONNXRUNTIME_ROOT}/lib/onnxruntime_providers_dml.dll"
+    "${ONNXRUNTIME_ROOT}/bin/onnxruntime_providers_dml.dll"
+)
+list(APPEND ORT_DLLS ${ORT_DML_RUNTIME_DLLS})
 file(GLOB EXTRA_RUNTIME_DLLS "${R800ZZ_RUNTIME_DLLS}/*.dll")
 
 add_custom_command(TARGET r800zz_ai_worker POST_BUILD

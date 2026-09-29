@@ -41,7 +41,7 @@ if not defined CUDA_ROOT_LOCAL (
 if exist "%RUNTIME_DLLS%" rmdir /s /q "%RUNTIME_DLLS%"
 mkdir "%RUNTIME_DLLS%" || exit /b 1
 
-echo Collecting CUDA-EP runtime DLLs into:
+echo Collecting unified CUDA + DirectML runtime DLLs into:
 echo   %RUNTIME_DLLS%
 
 rem Copy only the FFmpeg shared libraries linked by CMakeLists.txt.  The shared
@@ -52,11 +52,14 @@ call :copy_required_pattern "%FFMPEG_ROOT%\bin\avutil-*.dll" "FFmpeg avutil" || 
 call :copy_required_pattern "%FFMPEG_ROOT%\bin\swresample-*.dll" "FFmpeg swresample" || exit /b 1
 call :copy_required_pattern "%FFMPEG_ROOT%\bin\swscale-*.dll" "FFmpeg swscale" || exit /b 1
 
-rem The application uses CUDA EP only.  Do not include the unused TensorRT
-rem provider DLL that may also be present in the ONNX Runtime GPU package.
+rem One worker executable uses both CUDA and DirectML EPs. TensorRT remains unused.
 call :copy_required_pattern "%ONNXRUNTIME_ROOT%\lib\onnxruntime.dll" "ONNX Runtime" || exit /b 1
 call :copy_required_pattern "%ONNXRUNTIME_ROOT%\lib\onnxruntime_providers_shared.dll" "ONNX Runtime shared provider" || exit /b 1
 call :copy_required_pattern "%ONNXRUNTIME_ROOT%\lib\onnxruntime_providers_cuda.dll" "ONNX Runtime CUDA provider" || exit /b 1
+call :copy_optional_pattern "%ONNXRUNTIME_ROOT%\lib\DirectML.dll"
+call :copy_optional_pattern "%ONNXRUNTIME_ROOT%\bin\DirectML.dll"
+call :copy_optional_pattern "%ONNXRUNTIME_ROOT%\lib\onnxruntime_providers_dml.dll"
+call :copy_optional_pattern "%ONNXRUNTIME_ROOT%\bin\onnxruntime_providers_dml.dll"
 call :copy_all "%CUDNN_BIN%" "cuDNN" || exit /b 1
 
 rem Do not copy the entire CUDA bin directory.  It contains development and
@@ -93,7 +96,7 @@ for %%D in (
   if not exist "%RUNTIME_DLLS%\%%D" set "MISSING=!MISSING! %%D"
 )
 if defined MISSING (
-  echo ERROR: CUDA EP runtime bundle is incomplete. Missing:!MISSING!
+  echo ERROR: Unified worker runtime bundle is incomplete. Missing:!MISSING!
   echo FFMPEG_ROOT=%FFMPEG_ROOT%
   echo ONNXRUNTIME_ROOT=%ONNXRUNTIME_ROOT%
   echo CUDNN_BIN=%CUDNN_BIN%
@@ -102,7 +105,7 @@ if defined MISSING (
 )
 
 for /f %%N in ('dir /b /a-d "%RUNTIME_DLLS%\*.dll" 2^>nul ^| find /c /v ""') do set "DLL_COUNT=%%N"
-echo CUDA EP runtime bundle OK: !DLL_COUNT! DLLs collected.
+echo Unified worker runtime bundle OK: !DLL_COUNT! DLLs collected.
 endlocal & exit /b 0
 
 :copy_all
