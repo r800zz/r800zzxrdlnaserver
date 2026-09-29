@@ -199,8 +199,6 @@ FFmpeg se utiliza mediante sus bibliotecas de C y DLL compartidas:
 
 ## Limitaciones conocidas
 
-- Actualmente, el flujo de IA en tiempo real requiere una GPU NVIDIA.
-- La aceleración mediante GPU AMD e Intel no está implementada.
 - La codificación alfa WebM VP9 exige mucho a la CPU y puede no mantener la velocidad de fotogramas del vídeo de origen.
 - La compatibilidad con alfa y croma varía entre los reproductores DLNA/XR.
 - Actualmente, la aplicación está destinada a Windows x64.
