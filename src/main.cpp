@@ -916,7 +916,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                    L"R800ZZDlnaServerWindow", nullptr};
     RegisterClassExW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName,
-                              L"r800zzXRdlnaServer 0.3",
+                              L"r800zzXRdlnaServer 0.4",
                               WS_OVERLAPPEDWINDOW, 100, 100, 820, 720,
                               nullptr, nullptr, wc.hInstance, nullptr);
 
