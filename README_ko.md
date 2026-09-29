@@ -5,165 +5,158 @@
 ## Ver 0.4 : NVIDIA GPU라도 일부 모델만 지원되던 버그를 수정했습니다.
 ## Ver 0.4 : DirectML을 통해 NVIDIA 이외의 GPU도 지원하도록 추가했습니다.
 
-PICO, Meta Quest 및 기타 호환 장치에서 XR 비디오를 재생하기 위한 Windows용 DLNA 서버로, 실시간 AI 배경 제거(RVM), 알파/크로마 키 출력 및 비디오 변환 기능을 제공합니다.
+PICO, Meta Quest 및 기타 호환 기기에서 XR 비디오를 재생하기 위한 Windows DLNA 서버입니다. 실시간 AI 배경 제거(RVM), alpha/chroma-key 출력 및 비디오 변환을 지원합니다.
 
 **실시간 AI Passthrough를 사용하려면 고성능 GPU가 필요합니다.**
 
-`r800zzXRdlnaServer`는 네이티브 C++ 애플리케이션입니다. FFmpeg 라이브러리를 직접 사용하며 Python이나 `ffmpeg.exe`를 실행하지 않습니다.
+`r800zzXRdlnaServer`는 native C++ 애플리케이션이며 FFmpeg 라이브러리를 직접 사용하고 Python 또는 `ffmpeg.exe`를 실행하지 않습니다.
 
 ## 다운로드
 
 https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
 <a href="./jpeg/server_ko.jpeg" target="_blank">
-  <img src="./jpeg/server_ko.jpeg\" alt=\"r800zzXRdlnaServer for Windows" width="402" height="356" border="2"></a>
+  <img src="./jpeg/server_ko.jpeg" alt="r800zzXRdlnaServer for Windows" width="402" height="356" border="2">
+</a>
 
 ### 출력 형식을 지원하는 VR 비디오 플레이어
 
-그린 스크린 MP4의 경우 크로마 키 기능을 제공하는 VR 플레이어의 예는 다음과 같습니다.
+Green-screen MP4:
 
-- [PICO/Meta용 R800ZZbrowser](https://vr180g.com/browser/browser.php?l=kr)
-- [PICO/Meta용 r800zzvrplayer](https://vr180g.com/pico/vrplayer.php?l=kr)
+- [R800ZZbrowser for PICO/Meta](https://vr180g.com/browser/browser.php?l=kr)
+- [r800zzvrplayer for PICO/Meta](https://vr180g.com/pico/vrplayer.php?l=kr)
 
-Alpha Packed(DeoVR 알파 비디오 형식)의 경우:
+Alpha Packed:
 
-- [PICO/Meta용 r800zzvrplayer](https://vr180g.com/pico/vrplayer.php?l=kr)
-- DeoVR(비VR 비디오는 지원되지 않습니다.)
+- [r800zzvrplayer for PICO/Meta](https://vr180g.com/pico/vrplayer.php?l=kr)
+- DeoVR (비 VR 비디오는 지원하지 않습니다.)
 
-WebM VP9 Alpha에서 동작을 확인한 VR 플레이어:
+WebM VP9 Alpha:
 
 - **[r800zzvrplayer 0.6 이상](https://vr180g.com/pico/vrplayer.php?l=kr)**
 
 ## 기능
 
-- 선택한 비디오 폴더와 개별적으로 선택한 비디오 파일을 DLNA로 제공합니다.
-- DLNA 미디어 목록에 원본 파일명을 정확히 유지합니다.
-- DeoVR을 포함한 호환 클라이언트를 위해 UPnP/DLNA 검색 및 ContentDirectory를 지원합니다.
-- Robust Video Matting(RVM)을 사용해 비디오 배경을 실시간으로 제거합니다.
-- Alpha Packed, 실제 WebM VP9 알파 및 그린 크로마 키 출력을 지원합니다.
-- NVIDIA GPU 가속 및 CPU 폴백을 지원하는 오프라인 비디오 변환 기능을 내장합니다.
-- 오디오, 탐색, 일시 정지/재생, 전체 화면 및 SBS 왼쪽 절반 표시를 지원하는 간단한 Windows 비디오 플레이어를 포함합니다.
-- NVIDIA CUDA/RVM/NVENC 사용 가능 여부를 자동으로 감지합니다.
-- 영어, 러시아어, 스페인어, 태국어, 중국어, 한국어 및 일본어 인터페이스를 제공합니다.
-- 사용자별 설정은 설치 디렉터리가 아닌 `%LOCALAPPDATA%`에 저장됩니다.
+- 선택한 비디오 폴더와 개별 파일을 DLNA로 제공합니다.
+- DLNA 미디어 목록에서 원본 파일명을 유지합니다.
+- DeoVR을 포함한 호환 클라이언트의 UPnP/DLNA 및 ContentDirectory를 지원합니다.
+- Robust Video Matting(RVM)으로 실시간 배경 제거를 수행합니다.
+- Alpha Packed, WebM VP9 alpha, green chroma-key 출력을 지원합니다.
+- NVIDIA CUDA, DirectML, CPU AI backend를 지원합니다.
+- DirectML을 통해 호환되는 AMD, Intel, NVIDIA GPU에서 GPU 처리가 가능합니다.
+- GPU 가속 오프라인 변환과 CPU fallback을 지원합니다.
+- 오디오, seek, pause/resume, fullscreen, SBS 왼쪽 절반 표시를 지원하는 Windows 비디오 플레이어가 포함됩니다.
+- 7개 언어 UI를 제공합니다.
+- 설정은 `%LOCALAPPDATA%`에 저장됩니다.
 
 ## DLNA 출력 모드
 
 | 모드 | 출력 | 참고 |
 | --- | --- | --- |
-| Alpha Packed | MPEG-TS의 HEVC/NVENC | 호환 XR 플레이어용 고속 실시간 모드입니다. |
-| Alpha WebM VP9 | 실제 VP9 알파가 포함된 WebM | CPU 기반 libvpx 인코딩을 사용하며 특히 4K/60 비디오에서 프레임이 누락될 수 있습니다. |
-| Chroma Key | 그린 배경의 HEVC/NVENC | 수신 플레이어에서 그린 크로마 키 모드를 사용하십시오. |
-| OFF | 원본 소스 파일 | RVM 처리를 하지 않으며 NVIDIA GPU도 필요하지 않습니다. |
-
-알파 해석 방식은 수신 플레이어에 따라 달라집니다. 선택한 알파 형식을 지원하지 않는 클라이언트에서는 불투명한 영상으로 표시될 수 있습니다.
+| Alpha Packed | MPEG-TS의 HEVC | 호환 XR 플레이어용 빠른 실시간 모드 |
+| Alpha WebM VP9 | 실제 VP9 alpha WebM | CPU libvpx 인코딩을 사용하며 4K/60에서 프레임이 떨어질 수 있습니다. |
+| Chroma Key | 녹색 배경 HEVC | 수신 플레이어에서 green chroma-key를 사용합니다. |
+| OFF | 원본 파일 | RVM 처리를 하지 않으며 빠른 GPU가 필요하지 않습니다. |
 
 ## 시스템 요구 사항
 
-### 사전 빌드 릴리스
+### 사전 빌드 버전
 
-- Windows 10 또는 Windows 11, 64비트
-- Windows PC와 재생 장치가 연결된 동일한 사설 로컬 네트워크
-- 호환 DLNA 비디오 플레이어
-- 실시간 AI 모드용 지원 NVIDIA GPU 및 최신 NVIDIA 드라이버
+- Windows 10/11 64-bit
+- PC와 재생 기기가 연결된 같은 private LAN
+- 호환 DLNA 플레이어
+- 실시간 AI에 충분히 빠른 GPU
+- 선택한 GPU의 최신 그래픽 드라이버
 
-사전 빌드 패키지에는 필요한 애플리케이션 런타임 구성 요소가 포함되어 있습니다. 패키지 애플리케이션을 일반적으로 사용할 때는 CUDA Toolkit을 별도로 설치할 필요가 없습니다. GPU 작동에는 NVIDIA 디스플레이 드라이버가 필요합니다.
+AI backend:
 
-호환 NVIDIA GPU가 없는 경우:
+- **NVIDIA CUDA**: 지원되는 NVIDIA GPU용 최적화 경로
+- **DirectML**: 호환 AMD, Intel, NVIDIA GPU용 GPU 경로
+- **CPU**: fallback; 실시간 성능은 보장되지 않음
 
-- `OFF` 모드의 일반 DLNA 전송은 계속 사용할 수 있습니다.
-- 오프라인 RVM 변환은 ONNX Runtime CPU EP를 통해 FP32 ONNX 모델을 사용할 수 있습니다.
-- 실시간 Alpha Packed, Alpha WebM VP9 및 Chroma Key 모드는 비활성화됩니다.
+패키지에는 필요한 runtime이 포함되어 있으므로 일반 사용 시 CUDA Toolkit을 별도로 설치할 필요가 없습니다.
+
+NVIDIA CUDA backend는 호환 NVIDIA driver가 필요합니다. DirectML은 해당 GPU를 지원하는 최신 Windows graphics driver를 사용하십시오.
+
+GPU가 충분히 빠르지 않은 경우:
+
+- `OFF` 모드는 정상 사용 가능합니다.
+- 오프라인 RVM 변환은 다른 GPU backend 또는 CPU FP32 ONNX model을 사용할 수 있습니다.
+- 실시간 AI가 원본 frame rate를 유지하지 못할 수 있습니다.
 
 ## 설치
 
-1. Repository의 **Releases** 페이지에서 최신 Windows x64 설치 프로그램을 다운로드합니다.
-2. 설치 프로그램을 실행합니다.
+1. **Releases**에서 최신 Windows x64 installer를 다운로드합니다.
+2. installer를 실행합니다.
 3. `r800zzXRdlnaServer`를 시작합니다.
-4. Windows 방화벽에서 요청하면 **개인 네트워크**에 대한 액세스를 허용합니다.
+4. Windows Firewall이 묻는 경우 **Private networks** 접근을 허용합니다.
 
-GPU 빌드에는 ONNX Runtime CUDA 지원, CUDA/cuDNN 런타임 구성 요소, FFmpeg 라이브러리 및 RVM 모델이 포함되므로 설치 프로그램의 크기가 비교적 큽니다.
+Installer에는 ONNX Runtime GPU, DirectML, NVIDIA backend용 CUDA/cuDNN, FFmpeg 및 RVM model이 포함됩니다.
 
-## 기본 DLNA 사용법
+## 기본 DLNA 사용
 
-1. **비디오 폴더 선택...**으로 폴더를 선택하고 **비디오 파일 선택...**으로 개별 파일을 추가하거나 두 방법을 함께 사용합니다.
-2. 출력 모드를 선택합니다.
-   - **Alpha packed**
+1. 비디오 폴더 및/또는 개별 파일을 선택합니다.
+2. backend 선택:
+   - **NVIDIA CUDA**
+   - **DirectML**
+   - **CPU**
+3. 출력 모드 선택:
+   - **Alpha Packed**
    - **Alpha WebM VP9**
    - **Chroma Key**
    - **OFF**
-3. 게시할 IPv4 주소를 확인합니다.
-4. **DLNA 서버 시작**을 선택합니다.
-5. 동일한 로컬 네트워크에서 호환 DLNA 플레이어를 엽니다.
-6. `r800zzXRdlnaServer`를 선택한 다음 비디오를 선택합니다.
-
-서버 로그에는 DLNA 검색, 장치 설명 요청, 미디어 목록 요청, 재생 요청 및 worker 오류가 표시됩니다. **로그 지우기**로 표시된 로그를 지울 수 있습니다.
+4. DirectML 사용 시 GPU adapter를 선택합니다.
+5. IPv4 주소를 확인합니다.
+6. DLNA server를 시작합니다.
+7. 같은 LAN에서 호환 플레이어를 엽니다.
+8. `r800zzXRdlnaServer`와 비디오를 선택합니다.
 
 ## 비디오 변환
 
-내장 변환기는 다음 출력을 만들 수 있습니다.
+지원 형식:
 
-- 크로마 키 MP4
+- Chroma-key MP4
 - Alpha WebM VP9
 - Alpha Packed MP4
-
-제안되는 출력 파일명에는 변환 시작 시간이 포함됩니다.
 
 ```text
 movie_RVM_ChromaKey_202609210542.mp4
 ```
 
-변환 진행 상황은 출력 프레임 수로 표시됩니다. 변환기는 먼저 내부 임시 파일에 기록하고 인코더와 컨테이너가 성공적으로 완료된 후에만 요청된 출력 파일명을 생성합니다. 변환 로그는 출력 파일 옆에 저장됩니다.
-
-NVIDIA 가속을 사용할 수 있으면 변환에 NVDEC, CUDA, ONNX Runtime CUDA EP를 통한 RVM, 그리고 해당하는 경우 NVENC를 사용합니다. 그렇지 않으면 FFmpeg 소프트웨어 디코딩, ONNX Runtime CPU EP를 통한 FP32 RVM 모델 및 소프트웨어 인코딩을 사용합니다.
+RVM은 선택한 backend와 hardware에 따라 NVIDIA CUDA, DirectML 또는 CPU를 사용할 수 있습니다. NVIDIA CUDA 경로는 가능한 경우 NVDEC/NVENC를 사용합니다. DirectML은 호환되는 NVIDIA 및 비-NVIDIA GPU에서 GPU inference를 실행합니다. CPU도 fallback으로 사용할 수 있습니다.
 
 ## 내장 비디오 플레이어
 
-**비디오 플레이어...**는 DLNA 선택과 별개로 로컬 비디오를 엽니다.
+Play/Pause, Seek, 시간 표시, Fullscreen, SBS 왼쪽 절반 표시 및 단축키를 지원합니다.
 
-컨트롤:
+가능한 경우 NVIDIA NVDEC를 사용하고 필요 시 software decoding으로 fallback합니다. 플레이어 자체 사용에 NVIDIA GPU가 필수는 아닙니다.
 
-- 재생/일시 정지
-- 탐색 막대
-- 현재 시간 및 전체 시간
-- 전체 화면 전환
-- SBS 왼쪽 절반 표시
-- Space: 재생/일시 정지
-- 왼쪽/오른쪽 화살표: 5초 탐색
-- Escape: 전체 화면 종료 또는 일반 창에서 플레이어 닫기
+## 오디오
 
-플레이어는 지원되는 코덱에서 NVIDIA NVDEC를 먼저 시도하고 사용할 수 없으면 소프트웨어 디코딩으로 폴백합니다.
-
-## 오디오 처리
-
-- `OFF` 모드는 원본 파일을 변경하지 않고 전송하며 수신 플레이어가 오디오 코덱을 처리합니다.
-- Alpha Packed 및 Chroma Key MPEG-TS 출력은 AAC 오디오를 사용합니다.
-- Alpha WebM VP9 출력은 Opus 오디오를 사용합니다.
-- 필요한 경우 FFmpeg에서 디코딩할 수 있는 다른 소스 오디오를 트랜스코딩할 수 있습니다.
-- 멀티채널 입력은 스테레오로 다운믹스하고 모노 입력은 모노로 유지합니다.
+- `OFF`는 원본 파일을 그대로 전송합니다.
+- Alpha Packed 및 Chroma Key는 AAC를 사용합니다.
+- Alpha WebM VP9는 Opus를 사용합니다.
+- FFmpeg가 decode할 수 있는 다른 오디오는 transcode할 수 있습니다.
+- Multichannel은 stereo로 downmix합니다.
 
 ## 소스에서 빌드
 
 ### 요구 사항
 
-- Windows 10 또는 Windows 11, 64비트
-- **C++를 사용한 데스크톱 개발** 워크로드가 설치된 Visual Studio 2022
-- CMake 3.24 이상
-- NVIDIA CUDA Toolkit 12.8
-- 빌드 종속성을 다운로드할 때 인터넷 연결
+- Windows 10/11 64-bit
+- Visual Studio 2022 + **Desktop development with C++**
+- CMake 3.24+
+- CUDA backend 컴파일용 NVIDIA CUDA Toolkit 12.8
+- Internet
 
-### 빌드
-
-Repository 루트에서 명령 프롬프트를 열고 다음을 실행합니다.
+CUDA Toolkit은 NVIDIA CUDA backend의 build dependency입니다. 완성된 앱은 호환 비-NVIDIA GPU에서도 DirectML을 통해 AI 처리를 실행할 수 있습니다.
 
 ```bat
 setup_dependencies.bat
 build.bat
 ```
 
-`setup_dependencies.bat`는 고정 버전의 개발 종속성과 공식 RVM ONNX 모델을 다운로드합니다. `build.bat`는 CMake와 NMake를 사용해 프로젝트를 구성하고 빌드합니다.
-
-생성된 파일은 다음 위치에 있습니다.
+생성 파일:
 
 ```text
 build_cuda_ep\bin\r800zz_dlna_server.exe
@@ -172,58 +165,53 @@ build_cuda_ep\bin\rvm_mobilenetv3_fp16.onnx
 build_cuda_ep\bin\rvm_mobilenetv3_fp32.onnx
 ```
 
-현재 빌드는 FFmpeg 공유 패키지를 `N-124714-g49a77d37be`로 고정합니다. NVIDIA 드라이버 및 NVENC API 요구 사항을 확인하지 않고 고정 패키지를 항상 최신 버전을 사용하는 빌드로 변경하지 마십시오.
-
 ## 구현
 
-실시간 NVIDIA 처리 경로:
+AI backend:
+
+- **NVIDIA CUDA**
+- **DirectML**: 호환 AMD, Intel, NVIDIA GPU
+- **CPU**
+
+최적화된 NVIDIA 경로:
 
 ```text
 FFmpeg NVDEC
-    -> CUDA 전처리
+    -> CUDA preprocessing
     -> ONNX Runtime CUDA EP / RVM
-    -> CUDA 알파 패킹 또는 크로마 키 합성
+    -> CUDA alpha packing or chroma-key composition
     -> FFmpeg NVENC
     -> MPEG-TS / DLNA
 ```
 
-실제 WebM 알파 경로는 CUDA에서 YUVA420P 데이터를 준비하고 재사용 가능한 CPU 프레임으로 전송한 다음 `libvpx-vp9`를 사용합니다. NVIDIA GPU가 VP9 하드웨어 인코딩을 제공하지 않기 때문입니다.
+DirectML 선택 시 RVM inference는 선택한 호환 GPU에서 DirectML 경로로 실행됩니다. CUDA/NVDEC/NVENC 최적화는 NVIDIA 전용입니다.
 
-FFmpeg는 다음 C 라이브러리와 공유 DLL을 통해 사용됩니다.
-
-- `avformat`
-- `avcodec`
-- `avutil`
-- `swresample`
-- `swscale`
+WebM VP9 alpha는 CPU `libvpx-vp9` 인코딩을 사용합니다.
 
 ## 알려진 제한 사항
 
-- WebM VP9 알파 인코딩은 CPU 사용량이 높아 소스 프레임 속도를 유지하지 못할 수 있습니다.
-- 알파 및 크로마 키 지원은 DLNA/XR 플레이어마다 다릅니다.
-- 애플리케이션은 현재 Windows x64를 대상으로 합니다.
+- 실시간 AI 성능은 GPU 속도, 해상도, FPS, backend에 크게 좌우됩니다.
+- WebM VP9 alpha는 CPU 부하가 높습니다.
+- Alpha/chroma-key 지원은 플레이어마다 다릅니다.
+- Windows x64를 대상으로 합니다.
 
-## 서드파티 구성 요소
-
-이 프로젝트는 다음을 사용합니다.
+## 서드파티 구성요소
 
 - [Robust Video Matting](https://github.com/PeterL1n/RobustVideoMatting)
 - [FFmpeg](https://ffmpeg.org/)
 - [ONNX Runtime](https://github.com/microsoft/onnxruntime)
+- [DirectML](https://github.com/microsoft/DirectML)
 - [Dear ImGui](https://github.com/ocornut/imgui)
 - [NVIDIA CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit)
 - [NVIDIA cuDNN](https://developer.nvidia.com/cudnn)
 
-각 서드파티 구성 요소에는 해당 라이선스와 재배포 조건이 적용됩니다.
+NVIDIA CUDA/cuDNN은 NVIDIA backend용이며, DirectML 사용에 NVIDIA GPU가 필요하다는 의미가 아닙니다.
 
 ## 라이선스
 
-이 프로젝트는 **GNU General Public License v3.0**에 따라 배포됩니다. [LICENSE](LICENSE)를 참조하십시오.
-
-RVM 모델과 RVM에서 파생된 구성 요소에는 업스트림 Robust Video Matting 라이선스도 적용됩니다. 소스 배포 및 바이너리 릴리스는 해당하는 모든 저작권 및 라이선스 고지를 유지해야 합니다.
+이 프로젝트는 **GNU General Public License v3.0**으로 배포됩니다. [LICENSE](LICENSE)를 참조하십시오.
 
 ## 링크
 
 - [vr180g.com](https://vr180g.com/)
-- [YouTube의 R800ZZ](https://www.youtube.com/@R800ZZ)
-
+- [R800ZZ on YouTube](https://www.youtube.com/@R800ZZ)
