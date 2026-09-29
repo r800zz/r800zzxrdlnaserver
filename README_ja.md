@@ -1,10 +1,10 @@
-# r800zzXRdlnaServer for Windows+NVIDIA GPU
+# r800zzXRdlnaServer for Windows
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
 PICO、Meta Quest、その他の対応デバイスでのXR動画再生に対応し、リアルタイムAI背景除去（RVM）、アルファ／クロマキー出力、動画変換機能を備えたWindows用DLNAサーバーです。
 
-**リアルタイムAIパススルーにはNVIDIA GPUが必要です。**
+**リアルタイムAIパススルーには高速なGPUが必要です。**
 
 `r800zzXRdlnaServer` はネイティブC++アプリケーションです。FFmpegライブラリを直接使用し、Pythonや `ffmpeg.exe` は起動しません。
 
@@ -13,7 +13,7 @@ PICO、Meta Quest、その他の対応デバイスでのXR動画再生に対応�
 https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
 <a href="./jpeg/server_ja.jpeg" target="_blank">
-  <img src="./jpeg/server_ja.jpeg\" alt=\"r800zzXRdlnaServer for Windows+NVIDIAGPU" width="402" height="356" border="2"></a>
+  <img src="./jpeg/server_ja.jpeg\" alt=\"r800zzXRdlnaServer for Windows" width="402" height="356" border="2"></a>
 
 ### 出力に対応するVR動画プレイヤー
 
