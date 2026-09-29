@@ -1,10 +1,10 @@
-# r800zzXRdlnaServer for Windows+NVIDIA GPU
+# r800zzXRdlnaServer for Windows
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
 PICO, Meta Quest 및 기타 호환 장치에서 XR 비디오를 재생하기 위한 Windows용 DLNA 서버로, 실시간 AI 배경 제거(RVM), 알파/크로마 키 출력 및 비디오 변환 기능을 제공합니다.
 
-**실시간 AI 패스스루에는 NVIDIA GPU가 필요합니다.**
+**실시간 AI Passthrough를 사용하려면 고성능 GPU가 필요합니다.**
 
 `r800zzXRdlnaServer`는 네이티브 C++ 애플리케이션입니다. FFmpeg 라이브러리를 직접 사용하며 Python이나 `ffmpeg.exe`를 실행하지 않습니다.
 
@@ -13,7 +13,7 @@ PICO, Meta Quest 및 기타 호환 장치에서 XR 비디오를 재생하기 위
 https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
 <a href="./jpeg/server_ko.jpeg" target="_blank">
-  <img src="./jpeg/server_ko.jpeg\" alt=\"r800zzXRdlnaServer for Windows+NVIDIAGPU" width="402" height="356" border="2"></a>
+  <img src="./jpeg/server_ko.jpeg\" alt=\"r800zzXRdlnaServer for Windows" width="402" height="356" border="2"></a>
 
 ### 출력 형식을 지원하는 VR 비디오 플레이어
 
