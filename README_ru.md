@@ -1,4 +1,4 @@
-# r800zzXRdlnaServer for Windows+NVIDIA GPU
+# r800zzXRdlnaServer for Windows
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
@@ -13,7 +13,7 @@ DLNA-сервер для Windows, предназначенный для восп
 https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
 <a href="./jpeg/server_ru.jpeg" target="_blank">
-  <img src="./jpeg/server_ru.jpeg\" alt=\"r800zzXRdlnaServer for Windows+NVIDIAGPU" width="402" height="356" border="2"></a>
+  <img src="./jpeg/server_ru.jpeg\" alt=\"r800zzXRdlnaServer for Windows" width="402" height="356" border="2"></a>
 
 ### VR-видеоплееры, поддерживающие выходные форматы
 
