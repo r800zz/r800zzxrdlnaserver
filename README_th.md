@@ -2,6 +2,9 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+## Ver 0.4 : แก้ไขข้อบกพร่องที่ทำให้รองรับเฉพาะ GPU NVIDIA บางรุ่นเท่านั้น
+## Ver 0.4 : เพิ่มการรองรับ GPU ที่ไม่ใช่ NVIDIA ผ่าน DirectML
+
 เซิร์ฟเวอร์ DLNA สำหรับ Windows เพื่อเล่นวิดีโอ XR บน PICO, Meta Quest และอุปกรณ์ที่รองรับอื่น ๆ พร้อมการลบพื้นหลังด้วย AI แบบเรียลไทม์ (RVM), เอาต์พุตอัลฟา/โครมาคีย์ และการแปลงวิดีโอ
 
 **ต้องใช้ GPU ที่มีความเร็วสูงสำหรับ AI Passthrough แบบเรียลไทม์**
