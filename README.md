@@ -2,6 +2,9 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+## Ver 0.4 : Fixed a bug that limited support to certain NVIDIA GPUs.
+## Ver 0.4 : Added support for non-NVIDIA GPUs via DirectML.
+
 A Windows DLNA server for XR video playback on PICO, Meta Quest, and other compatible devices, featuring real-time AI background removal (RVM), alpha/chroma-key output, and video conversion.
 
 **A fast GPU is required for real-time AI passthrough.**
