@@ -35,6 +35,19 @@ For WebM VP9 Alpha, the VR player I have confirmed is:
 
 - **[r800zzvrplayer 0.6 or later](https://vr180g.com/pico/vrplayer.php?l=en)**
 
+## File Emulation in AI Mode
+
+Real-time AI conversion is delivered as a live stream rather than as a file.  
+Because it is a live stream, seeking to an arbitrary position would not be possible without special handling.  
+In a live stream, future data has not yet been generated, so the total video duration is also unknown.  
+Not being able to seek is inconvenient.  
+Not knowing the video duration is also inconvenient.  
+For this reason, the r800zzvrplayer video player uses file emulation so that the stream can be handled like a normal file, allowing seeking and displaying the video duration.  
+This optimized file emulation was possible because the DLNA server and the video player were developed by the same developer.  
+r800zzvrplayer has a special communication mode with r800zzXRdlnaServer, allowing optimized operation between the two applications.  
+File emulation has also been implemented for DeoVR, but because all compatibility handling must be performed on the server side, optimization is more difficult.  
+As a result, response times are longer with DeoVR.
+
 ## Features
 
 - Serves a selected video folder and individually selected video files through DLNA.
