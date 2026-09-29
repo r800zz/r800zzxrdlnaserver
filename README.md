@@ -4,7 +4,7 @@
 
 A Windows DLNA server for XR video playback on PICO, Meta Quest, and other compatible devices, featuring real-time AI background removal (RVM), alpha/chroma-key output, and video conversion.
 
-**An NVIDIA GPU is required for real-time AI passthrough.**
+**An fast GPU is required for real-time AI passthrough.**
 
 `r800zzXRdlnaServer` is a native C++ application. It uses the FFmpeg libraries directly and does not launch Python or `ffmpeg.exe`.
 
@@ -13,7 +13,7 @@ A Windows DLNA server for XR video playback on PICO, Meta Quest, and other compa
 https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
 <a href="./jpeg/server_en.jpeg" target="_blank">
-  <img src="./jpeg/server_en.jpeg\" alt=\"r800zzXRdlnaServer for Windows+NVIDIAGPU" width="402" height="356" border="2"></a>
+  <img src="./jpeg/server_en.jpeg\" alt=\"r800zzXRdlnaServer for Windows" width="402" height="356" border="2"></a>
 
 
 ### VR video players supporting the output
