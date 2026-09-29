@@ -200,8 +200,6 @@ FFmpeg is used through its C libraries and shared DLLs:
 
 ## Known Limitations
 
-- The real-time AI pipeline currently requires an NVIDIA GPU.
-- AMD and Intel GPU acceleration is not implemented.
 - WebM VP9 alpha encoding is CPU-intensive and may not maintain the source frame rate.
 - Alpha and chroma-key support varies between DLNA/XR players.
 - The application currently targets Windows x64.
