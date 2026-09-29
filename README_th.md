@@ -1,10 +1,10 @@
-# r800zzXRdlnaServer for Windows+NVIDIA GPU
+# r800zzXRdlnaServer for Windows
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
 เซิร์ฟเวอร์ DLNA สำหรับ Windows เพื่อเล่นวิดีโอ XR บน PICO, Meta Quest และอุปกรณ์ที่รองรับอื่น ๆ พร้อมการลบพื้นหลังด้วย AI แบบเรียลไทม์ (RVM), เอาต์พุตอัลฟา/โครมาคีย์ และการแปลงวิดีโอ
 
-**การใช้ AI Passthrough แบบเรียลไทม์จำเป็นต้องใช้ GPU ของ NVIDIA**
+**ต้องใช้ GPU ที่มีความเร็วสูงสำหรับ AI Passthrough แบบเรียลไทม์**
 
 `r800zzXRdlnaServer` เป็นแอปพลิเคชัน C++ แบบเนทีฟ ใช้ไลบรารี FFmpeg โดยตรง และไม่เรียกใช้ Python หรือ `ffmpeg.exe`
 
@@ -13,7 +13,7 @@
 https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
 <a href="./jpeg/server_th.jpeg" target="_blank">
-  <img src="./jpeg/server_th.jpeg\" alt=\"r800zzXRdlnaServer for Windows+NVIDIAGPU" width="402" height="356" border="2"></a>
+  <img src="./jpeg/server_th.jpeg\" alt=\"r800zzXRdlnaServer for Windows" width="402" height="356" border="2"></a>
 
 ### โปรแกรมเล่นวิดีโอ VR ที่รองรับเอาต์พุต
 
