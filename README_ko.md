@@ -2,8 +2,12 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
-## Ver 0.4 : NVIDIA GPU라도 일부 모델만 지원되던 버그를 수정했습니다.
-## Ver 0.4 : DirectML을 통해 NVIDIA 이외의 GPU도 지원하도록 추가했습니다.
+### Ver 0.5 : WebXR HTTPS 서버를 추가했습니다. (PC에 저장된 WebXR 게임을 플레이할 수 있습니다.)
+### Ver 0.5 : DLNA에서 계층형 폴더 탐색을 지원합니다.
+### Ver 0.5 : AI 파일 변환에서 GPU 선택을 지원합니다.
+### Ver 0.5 : 비디오 플레이어의 GPU 처리를 개선했습니다.
+### Ver 0.4 : NVIDIA GPU라도 일부 모델만 지원되던 버그를 수정했습니다.
+### Ver 0.4 : DirectML을 통해 NVIDIA 이외의 GPU도 지원하도록 추가했습니다.
 
 PICO, Meta Quest 및 기타 호환 기기에서 XR 비디오를 재생하기 위한 Windows DLNA 서버입니다. 실시간 AI 배경 제거(RVM), alpha/chroma-key 출력 및 비디오 변환을 지원합니다.
 
