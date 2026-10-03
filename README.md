@@ -2,8 +2,12 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
-## Ver 0.4 : Fixed a bug that limited support to certain NVIDIA GPUs.
-## Ver 0.4 : Added support for non-NVIDIA GPUs via DirectML.
+### Ver 0.5 : Added a WebXR HTTPS server. (You can play WebXR games stored on your PC.)
+### Ver 0.5 : Added support for hierarchical directory browsing in DLNA.
+### Ver 0.5 : Added GPU selection for AI file conversion.
+### Ver 0.5 : Improved GPU handling in the video player.
+### Ver 0.4 : Fixed a bug that limited support to certain NVIDIA GPUs.
+### Ver 0.4 : Added support for non-NVIDIA GPUs via DirectML.
 
 A Windows DLNA server for XR video playback on PICO, Meta Quest, and other compatible devices, featuring real-time AI background removal (RVM), alpha/chroma-key output, and video conversion.
 
