@@ -42,14 +42,19 @@ public:
     static std::vector<std::string> GetLocalIPv4Addresses();
     static std::vector<std::filesystem::path> FindMediaFiles(
         const std::filesystem::path& media_directory);
+    static std::vector<std::filesystem::path> FindFiles(
+        const std::filesystem::path& media_directory, bool video_files_only);
     static bool IsMediaFile(const std::filesystem::path& media_file);
+    static bool IsShareableFile(const std::filesystem::path& file,
+                                bool video_files_only);
     static AiCapabilityResult ProbeAiCapability();
 
     bool Start(const std::vector<std::filesystem::path>& media_files,
                const std::string& advertised_ip,
                bool ai_passthrough, AiOutputMode ai_output_mode,
                AiBackend ai_backend = AiBackend::NvidiaCuda,
-               int directml_device = 0);
+               int directml_device = 0,
+               bool video_files_only = true);
     void Stop();
 
     // AI worker lifetime follows the selected AI Passthrough mode, not an HTTP request.
@@ -61,6 +66,7 @@ public:
     bool IsRunning() const { return running_.load(); }
     uint16_t Port() const { return http_port_; }
     std::string AdvertisedIp() const;
+    std::string BaseUrl() const;
     std::string Status() const;
     std::vector<std::string> Logs() const;
     void ClearLogs();
@@ -80,6 +86,14 @@ private:
         int64_t duration_ms{0};
         int width{0};
         int height{0};
+        bool is_video{false};
+        std::string parent_id{"0"};
+    };
+
+    struct DirectoryItem {
+        std::string id;
+        std::string parent_id{"0"};
+        std::filesystem::path path;
     };
 
     // Common DLNA/HTTP/pipe streaming path. CUDA/DirectML/CPU differ only in
@@ -116,6 +130,9 @@ private:
     std::string DisplayTitle(const MediaItem& item) const;
     const MediaItem* FindMediaItem(const std::string& request_path) const;
     const MediaItem* FindMediaItemByObjectId(const std::string& object_id) const;
+    const DirectoryItem* FindDirectoryItemByObjectId(
+        const std::string& object_id) const;
+    size_t DirectChildCount(const std::string& parent_id) const;
     static bool ProbeMedia(const std::filesystem::path& path, int64_t& duration_ms,
                            int& width, int& height);
 
@@ -124,12 +141,14 @@ private:
     void StopResidentAiWorker();
 
     std::vector<MediaItem> media_items_;
+    std::vector<DirectoryItem> directory_items_;
     std::string advertised_ip_;
     std::string uuid_;
     bool ai_passthrough_{false};
     AiOutputMode ai_output_mode_{AiOutputMode::AlphaPackedHevc};
     AiBackend ai_backend_{AiBackend::NvidiaCuda};
     int directml_device_{0};
+    bool video_files_only_{true};
 
     std::atomic<bool> running_{false};
     SOCKET http_listen_socket_{INVALID_SOCKET};

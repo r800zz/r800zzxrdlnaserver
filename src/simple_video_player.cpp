@@ -3,6 +3,8 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <d3d11.h>
+#include <dxgi.h>
 #include <mmsystem.h>
 
 extern "C" {
@@ -12,7 +14,9 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/error.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_d3d11va.h>
 #include <libavutil/mathematics.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/samplefmt.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
@@ -111,7 +115,8 @@ public:
     }
 
     bool create(const std::filesystem::path& input, int videoWidth,
-                int videoHeight, int64_t durationUs, bool usingNvdec,
+                int videoHeight, int64_t durationUs,
+                const std::wstring& decodeDeviceLabel,
                 std::string& error) {
         width_ = videoWidth;
         height_ = videoHeight;
@@ -168,8 +173,7 @@ public:
                         videoClientHeight + kControlHeight};
         AdjustWindowRect(&windowRect, windowStyle, FALSE);
         const std::wstring title = std::wstring(L"Video Player [") +
-            (usingNvdec ? L"NVIDIA NVDEC" : L"CPU") + L"] - " +
-            input.filename().wstring();
+            decodeDeviceLabel + L"] - " + input.filename().wstring();
         hwnd_ = CreateWindowExW(
             0, windowClass.lpszClassName, title.c_str(), windowStyle,
             CW_USEDEFAULT, CW_USEDEFAULT,
@@ -748,27 +752,31 @@ struct BufferRefCloser {
     }
 };
 
-AVPixelFormat chooseCudaFormat(AVCodecContext*, const AVPixelFormat* formats) {
+AVPixelFormat chooseD3D11Format(AVCodecContext*, const AVPixelFormat* formats) {
+    AVPixelFormat softwareFallback = AV_PIX_FMT_NONE;
     for (const AVPixelFormat* format = formats;
          format && *format != AV_PIX_FMT_NONE; ++format) {
-        if (*format == AV_PIX_FMT_CUDA) return *format;
+        if (*format == AV_PIX_FMT_D3D11) return *format;
+        const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(*format);
+        if (softwareFallback == AV_PIX_FMT_NONE && descriptor &&
+            (descriptor->flags & AV_PIX_FMT_FLAG_HWACCEL) == 0) {
+            softwareFallback = *format;
+        }
     }
-    return AV_PIX_FMT_NONE;
+    return softwareFallback;
 }
 
-const char* cuvidDecoderName(AVCodecID codecId) {
-    switch (codecId) {
-    case AV_CODEC_ID_H264: return "h264_cuvid";
-    case AV_CODEC_ID_HEVC: return "hevc_cuvid";
-    case AV_CODEC_ID_VP8: return "vp8_cuvid";
-    case AV_CODEC_ID_VP9: return "vp9_cuvid";
-    case AV_CODEC_ID_AV1: return "av1_cuvid";
-    case AV_CODEC_ID_MPEG1VIDEO: return "mpeg1_cuvid";
-    case AV_CODEC_ID_MPEG2VIDEO: return "mpeg2_cuvid";
-    case AV_CODEC_ID_VC1: return "vc1_cuvid";
-    case AV_CODEC_ID_MJPEG: return "mjpeg_cuvid";
-    default: return nullptr;
+bool decoderSupportsD3D11(const AVCodec* codec) {
+    if (!codec) return false;
+    for (int i = 0;; ++i) {
+        const AVCodecHWConfig* config = avcodec_get_hw_config(codec, i);
+        if (!config) break;
+        if (config->pix_fmt == AV_PIX_FMT_D3D11 &&
+            (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) != 0) {
+            return true;
+        }
     }
+    return false;
 }
 
 bool openDecoder(AVFormatContext* format, int streamIndex,
@@ -788,27 +796,59 @@ bool openDecoder(AVFormatContext* format, int streamIndex,
     return true;
 }
 
+std::wstring d3d11AdapterName(AVBufferRef* hardwareDevice) {
+    if (!hardwareDevice || !hardwareDevice->data) return L"D3D11VA";
+
+    auto* hwDeviceContext =
+        reinterpret_cast<AVHWDeviceContext*>(hardwareDevice->data);
+    if (!hwDeviceContext ||
+        hwDeviceContext->type != AV_HWDEVICE_TYPE_D3D11VA ||
+        !hwDeviceContext->hwctx) {
+        return L"D3D11VA";
+    }
+
+    auto* d3d11Context =
+        reinterpret_cast<AVD3D11VADeviceContext*>(hwDeviceContext->hwctx);
+    if (!d3d11Context || !d3d11Context->device) return L"D3D11VA";
+
+    IDXGIDevice* dxgiDevice = nullptr;
+    if (FAILED(d3d11Context->device->QueryInterface(
+            IID_PPV_ARGS(&dxgiDevice))) || !dxgiDevice) {
+        return L"D3D11VA";
+    }
+
+    IDXGIAdapter* adapter = nullptr;
+    std::wstring result = L"D3D11VA";
+    if (SUCCEEDED(dxgiDevice->GetAdapter(&adapter)) && adapter) {
+        DXGI_ADAPTER_DESC description{};
+        if (SUCCEEDED(adapter->GetDesc(&description)) &&
+            description.Description[0] != L'\0') {
+            result = std::wstring(L"D3D11VA: ") + description.Description;
+        }
+        adapter->Release();
+    }
+    dxgiDevice->Release();
+    return result;
+}
+
 bool openVideoDecoder(
     AVFormatContext* format, int streamIndex,
     std::unique_ptr<AVCodecContext, CodecCloser>& decoder,
-    std::unique_ptr<AVBufferRef, BufferRefCloser>& cudaDevice,
-    bool& usingNvdec, std::string& error) {
-    usingNvdec = false;
+    std::unique_ptr<AVBufferRef, BufferRefCloser>& hardwareDevice,
+    bool& usingHardwareDecode, std::wstring& decodeDeviceLabel,
+    std::string& error) {
+    usingHardwareDecode = false;
+    decodeDeviceLabel = L"CPU";
     AVStream* stream = format->streams[streamIndex];
-    const char* decoderName = cuvidDecoderName(stream->codecpar->codec_id);
-    const AVCodec* hardwareCodec = decoderName
-        ? avcodec_find_decoder_by_name(decoderName) : nullptr;
+    const AVCodec* codec = avcodec_find_decoder(stream->codecpar->codec_id);
 
-    if (hardwareCodec) {
+    if (decoderSupportsD3D11(codec)) {
         AVBufferRef* rawDevice = nullptr;
-        AVDictionary* deviceOptions = nullptr;
-        av_dict_set(&deviceOptions, "primary_ctx", "1", 0);
         const int deviceResult = av_hwdevice_ctx_create(
-            &rawDevice, AV_HWDEVICE_TYPE_CUDA, "0", deviceOptions, 0);
-        av_dict_free(&deviceOptions);
+            &rawDevice, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
         if (deviceResult >= 0 && rawDevice) {
             std::unique_ptr<AVCodecContext, CodecCloser> candidate(
-                avcodec_alloc_context3(hardwareCodec));
+                avcodec_alloc_context3(codec));
             int rc = candidate
                 ? avcodec_parameters_to_context(candidate.get(), stream->codecpar)
                 : AVERROR(ENOMEM);
@@ -817,14 +857,15 @@ bool openVideoDecoder(
                 if (!candidate->hw_device_ctx) rc = AVERROR(ENOMEM);
             }
             if (rc >= 0) {
-                candidate->get_format = chooseCudaFormat;
+                candidate->get_format = chooseD3D11Format;
                 candidate->pkt_timebase = stream->time_base;
-                rc = avcodec_open2(candidate.get(), hardwareCodec, nullptr);
+                rc = avcodec_open2(candidate.get(), codec, nullptr);
             }
             if (rc >= 0) {
+                decodeDeviceLabel = d3d11AdapterName(rawDevice);
                 decoder = std::move(candidate);
-                cudaDevice.reset(rawDevice);
-                usingNvdec = true;
+                hardwareDevice.reset(rawDevice);
+                usingHardwareDecode = true;
                 return true;
             }
             av_buffer_unref(&rawDevice);
@@ -833,9 +874,9 @@ bool openVideoDecoder(
         }
     }
 
-    // NVIDIA hardware decoding is optional. Unsupported codecs, unsupported
-    // profiles, systems without an NVIDIA GPU, and FFmpeg builds without CUVID
-    // all continue through the ordinary software decoder.
+    // Hardware decode is optional. D3D11VA uses the Windows default adapter
+    // and works across NVIDIA, AMD and Intel. Unsupported codecs/profiles or
+    // hardware initialization failures fall back to the ordinary CPU decoder.
     return openDecoder(format, streamIndex, decoder, error);
 }
 
@@ -1213,10 +1254,11 @@ bool RunSimpleVideoPlayer(const std::filesystem::path& input,
     AVStream* videoStream = format->streams[videoIndex];
 
     std::unique_ptr<AVCodecContext, CodecCloser> videoDecoder;
-    std::unique_ptr<AVBufferRef, BufferRefCloser> cudaDevice;
-    bool usingNvdec = false;
-    if (!openVideoDecoder(format.get(), videoIndex, videoDecoder, cudaDevice,
-                          usingNvdec, error)) return false;
+    std::unique_ptr<AVBufferRef, BufferRefCloser> hardwareDevice;
+    bool usingHardwareDecode = false;
+    std::wstring decodeDeviceLabel = L"CPU";
+    if (!openVideoDecoder(format.get(), videoIndex, videoDecoder, hardwareDevice,
+                          usingHardwareDecode, decodeDeviceLabel, error)) return false;
     if (videoDecoder->width <= 0 || videoDecoder->height <= 0) {
         error = "Video Player received invalid video dimensions"; return false;
     }
@@ -1230,7 +1272,7 @@ bool RunSimpleVideoPlayer(const std::filesystem::path& input,
     const int64_t inputStartUs = format->start_time != AV_NOPTS_VALUE ? format->start_time : 0;
     PlayerWindow window(language);
     if (!window.create(input, videoDecoder->width, videoDecoder->height,
-                       durationUs, usingNvdec, error)) return false;
+                       durationUs, decodeDeviceLabel, error)) return false;
 
     std::unique_ptr<AVPacket, PacketCloser> packet(av_packet_alloc());
     std::unique_ptr<AVFrame, FrameCloser> videoFrame(av_frame_alloc());
@@ -1395,19 +1437,19 @@ bool RunSimpleVideoPlayer(const std::filesystem::path& input,
                 break;
             }
             AVFrame* displayFrame = videoFrame.get();
-            if (videoFrame->format == AV_PIX_FMT_CUDA) {
+            if (videoFrame->format == AV_PIX_FMT_D3D11) {
                 av_frame_unref(softwareVideoFrame.get());
                 rc = av_hwframe_transfer_data(
                     softwareVideoFrame.get(), videoFrame.get(), 0);
                 if (rc < 0) {
                     cleanupScaler();
-                    error = "Video Player NVDEC frame transfer: " + fferr(rc);
+                    error = "Video Player D3D11VA frame transfer: " + fferr(rc);
                     return false;
                 }
                 rc = av_frame_copy_props(softwareVideoFrame.get(), videoFrame.get());
                 if (rc < 0) {
                     cleanupScaler();
-                    error = "Video Player NVDEC frame properties: " + fferr(rc);
+                    error = "Video Player D3D11VA frame properties: " + fferr(rc);
                     return false;
                 }
                 displayFrame = softwareVideoFrame.get();

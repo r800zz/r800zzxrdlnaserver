@@ -71,6 +71,12 @@ constexpr size_t kGenericTailProbeCacheMaxEntries = 16;
 std::mutex g_generic_tail_probe_cache_mutex;
 std::unordered_map<std::string, std::vector<char>> g_generic_tail_probe_cache;
 
+// The UI calls FindFiles() with the selected folder before Start(). Keep that
+// folder as the DLNA ContentDirectory root so Browse can expose real folders
+// instead of flattening every descendant file into object 0.
+std::mutex g_last_find_files_root_mutex;
+std::filesystem::path g_last_find_files_root;
+
 bool LoadGenericTailProbeCache(const std::string& key,
                                uint64_t expectedBytes,
                                std::vector<char>& body) {
@@ -776,7 +782,7 @@ AiCapabilityResult DlnaServer::ProbeAiCapability() {
 
     ResumeThread(processInfo.hThread);
     CloseHandle(processInfo.hThread);
-    const DWORD wait = WaitForSingleObject(processInfo.hProcess, 30000);
+    const DWORD wait = WaitForSingleObject(processInfo.hProcess, 60000);
     const bool timedOut = wait == WAIT_TIMEOUT;
     const bool waitFailed = wait == WAIT_FAILED;
     if (timedOut || waitFailed) {
@@ -1137,33 +1143,57 @@ std::vector<std::string> DlnaServer::GetLocalIPv4Addresses() {
 
 std::vector<std::filesystem::path> DlnaServer::FindMediaFiles(
     const std::filesystem::path& media_directory) {
+    return FindFiles(media_directory, true);
+}
+
+std::vector<std::filesystem::path> DlnaServer::FindFiles(
+    const std::filesystem::path& media_directory, bool video_files_only) {
     std::vector<std::filesystem::path> result;
     std::error_code ec;
-    if (!std::filesystem::is_directory(media_directory, ec)) return result;
+    if (!std::filesystem::is_directory(media_directory, ec)) {
+        std::lock_guard<std::mutex> lock(g_last_find_files_root_mutex);
+        g_last_find_files_root.clear();
+        return result;
+    }
 
-    std::filesystem::directory_iterator iterator(
+    std::filesystem::path normalizedRoot =
+        std::filesystem::absolute(media_directory, ec).lexically_normal();
+    if (ec) {
+        ec.clear();
+        normalizedRoot = media_directory.lexically_normal();
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_last_find_files_root_mutex);
+        g_last_find_files_root = normalizedRoot;
+    }
+
+    std::filesystem::recursive_directory_iterator iterator(
         media_directory,
         std::filesystem::directory_options::skip_permission_denied,
         ec);
-    const std::filesystem::directory_iterator end;
-    while (!ec && iterator != end) {
+    const std::filesystem::recursive_directory_iterator end;
+    while (iterator != end) {
         const auto& entry = *iterator;
         std::error_code fileError;
-        if (entry.is_regular_file(fileError) && !fileError &&
-            IsSupportedVideoExtension(entry.path())) {
-            int64_t duration = 0;
-            int width = 0;
-            int height = 0;
-            if (ProbeMedia(entry.path(), duration, width, height)) {
+        if (entry.is_regular_file(fileError) && !fileError) {
+            if (!video_files_only) {
                 result.push_back(entry.path());
+            } else if (IsSupportedVideoExtension(entry.path())) {
+                int64_t duration = 0;
+                int width = 0;
+                int height = 0;
+                if (ProbeMedia(entry.path(), duration, width, height)) {
+                    result.push_back(entry.path());
+                }
             }
         }
         iterator.increment(ec);
+        if (ec) ec.clear();
     }
 
     std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
-        std::wstring a = left.filename().wstring();
-        std::wstring b = right.filename().wstring();
+        std::wstring a = left.wstring();
+        std::wstring b = right.wstring();
         std::transform(a.begin(), a.end(), a.begin(), [](wchar_t c) {
             return static_cast<wchar_t>(std::towlower(c));
         });
@@ -1185,6 +1215,13 @@ bool DlnaServer::IsMediaFile(const std::filesystem::path& media_file) {
     int width = 0;
     int height = 0;
     return ProbeMedia(media_file, duration, width, height);
+}
+
+bool DlnaServer::IsShareableFile(const std::filesystem::path& file,
+                                 bool video_files_only) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(file, ec) || ec) return false;
+    return !video_files_only || IsMediaFile(file);
 }
 
 bool DlnaServer::ProbeMedia(const std::filesystem::path& path,
@@ -1223,11 +1260,13 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
                        bool ai_passthrough,
                        AiOutputMode ai_output_mode,
                        AiBackend ai_backend,
-                       int directml_device) {
+                       int directml_device,
+                       bool video_files_only) {
     Stop();
 
     if (media_files.empty()) {
-        SetStatus("No video files are selected.");
+        SetStatus(video_files_only ? "No video files are selected."
+                                   : "No files are selected.");
         return false;
     }
     if (advertised_ip.empty()) {
@@ -1236,6 +1275,7 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
     }
 
     media_items_.clear();
+    directory_items_.clear();
     std::error_code ec;
     std::set<std::filesystem::path> seenFiles;
     uint32_t nextId = 1;
@@ -1249,34 +1289,106 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
         if (!seenFiles.insert(normalized).second) continue;
         MediaItem item;
         item.path = normalized;
+        if (!std::filesystem::is_regular_file(normalized, ec) || ec) {
+            ec.clear();
+            continue;
+        }
         item.size = std::filesystem::file_size(normalized, ec);
         if (ec) {
             ec.clear();
             item.size = 0;
         }
-        if (!ProbeMedia(normalized, item.duration_ms, item.width, item.height)) {
-            AddLog("Skipped unreadable video: " +
+
+        if (IsSupportedVideoExtension(normalized)) {
+            item.is_video = ProbeMedia(
+                normalized, item.duration_ms, item.width, item.height);
+        }
+        if (video_files_only && !item.is_video) {
+            AddLog("Skipped unsupported/unreadable video: " +
                    WideToUtf8(normalized.filename().wstring()));
             continue;
         }
+
         item.id = nextId++;
         media_items_.push_back(std::move(item));
     }
     if (media_items_.empty()) {
-        SetStatus("No supported video files were found in the selection.");
+        SetStatus(video_files_only
+            ? "No supported video files were found in the selection."
+            : "No readable files were found in the selection.");
         return false;
     }
+
+    // Build a real ContentDirectory folder tree. FindFiles() remembers the
+    // selected folder used by the UI, so that folder itself maps to object 0
+    // and each descendant folder becomes a DLNA container.
+    std::filesystem::path browseRoot;
+    {
+        std::lock_guard<std::mutex> lock(g_last_find_files_root_mutex);
+        browseRoot = g_last_find_files_root;
+    }
+
+    std::unordered_map<std::wstring, std::string> directoryIds;
+    auto pathKey = [](const std::filesystem::path& path) {
+        std::wstring key = path.lexically_normal().wstring();
+        std::transform(key.begin(), key.end(), key.begin(), [](wchar_t c) {
+            return static_cast<wchar_t>(std::towlower(c));
+        });
+        return key;
+    };
+
+    auto ensureDirectory = [&](const std::filesystem::path& directory) {
+        if (browseRoot.empty()) return std::string("0");
+
+        const std::filesystem::path relative =
+            directory.lexically_normal().lexically_relative(browseRoot);
+        if (relative.empty() || relative == L".") return std::string("0");
+
+        for (const auto& component : relative) {
+            if (component == L"..") return std::string("0");
+        }
+
+        std::filesystem::path current = browseRoot;
+        std::string parentId = "0";
+        for (const auto& component : relative) {
+            if (component.empty() || component == L".") continue;
+            current /= component;
+            const std::wstring key = pathKey(current);
+            const auto existing = directoryIds.find(key);
+            if (existing != directoryIds.end()) {
+                parentId = existing->second;
+                continue;
+            }
+
+            DirectoryItem item;
+            item.id = "D" + std::to_string(directory_items_.size() + 1);
+            item.parent_id = parentId;
+            item.path = current.lexically_normal();
+            parentId = item.id;
+            directoryIds.emplace(key, item.id);
+            directory_items_.push_back(std::move(item));
+        }
+        return parentId;
+    };
+
+    for (auto& item : media_items_) {
+        item.parent_id = ensureDirectory(item.path.parent_path());
+    }
+
     advertised_ip_ = advertised_ip;
     ai_passthrough_ = ai_passthrough;
     ai_output_mode_ = ai_output_mode;
     ai_backend_ = ai_backend;
     directml_device_ = directml_device;
+    video_files_only_ = video_files_only;
 
     // CUDA/DirectML/CPU use the same resident/prewarm lifecycle.
-    // Normally this worker is already resident before Start(); this is only
-    // a safety net if Start() is called without a completed prewarm.
-    if (ai_passthrough_) {
-        SetAiPrewarm(true, media_items_.front().path, ai_backend_, directml_device_);
+    // Non-video files are always served raw, even when AI Passthrough is ON.
+    const auto firstVideo = std::find_if(
+        media_items_.begin(), media_items_.end(),
+        [](const MediaItem& item) { return item.is_video; });
+    if (ai_passthrough_ && firstVideo != media_items_.end()) {
+        SetAiPrewarm(true, firstVideo->path, ai_backend_, directml_device_);
     } else {
         SetAiPrewarm(false, {}, ai_backend_, directml_device_);
     }
@@ -1298,7 +1410,9 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
     AddLog("Build: DeoVR_Search_NoEraseRedraw_SkyBlueUI_TitleLinks");
     AddLog("DLNA server started: http://" + advertised_ip_ + ":" +
            std::to_string(http_port_) + "/media/<id>");
-    AddLog("Video files: " + std::to_string(media_items_.size()));
+    AddLog(std::string(video_files_only_ ? "Video files: " : "Shared files: ") +
+           std::to_string(media_items_.size()));
+    AddLog("DLNA folders: " + std::to_string(directory_items_.size()));
     AddLog(std::string("AI Passthrough: ") + (ai_passthrough_ ? "ON" : "OFF"));
     if (ai_passthrough_) AddLog("AI Output: " + AiOutputLabel());
 
@@ -1356,6 +1470,13 @@ void DlnaServer::Stop() {
 std::string DlnaServer::AdvertisedIp() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return advertised_ip_;
+}
+
+std::string DlnaServer::BaseUrl() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (advertised_ip_.empty() || http_port_ == 0) return {};
+    return "http://" + advertised_ip_ + ":" +
+           std::to_string(http_port_) + "/";
 }
 
 std::string DlnaServer::Status() const {
@@ -1787,9 +1908,9 @@ void DlnaServer::HandleHttpClient(SOCKET client) {
             closesocket(client);
             return;
         }
-        if (ai_passthrough_) {
+        if (ai_passthrough_ && item->is_video) {
             // CUDA / DirectML / CPU all use the same DLNA/HTTP/pipe streaming path.
-            // Only the worker/model/backend selection differs.
+            // Non-video files such as .vrm are always served as their raw bytes.
             HandleAiPassthroughStream(client, method, request, *item);
             closesocket(client);
             return;
@@ -2863,7 +2984,7 @@ std::string DlnaServer::MediaUrl(const MediaItem& item) const {
 }
 
 std::string DlnaServer::MimeType(const MediaItem& item) const {
-    if (ai_passthrough_) {
+    if (ai_passthrough_ && item.is_video) {
         return ai_output_mode_ == AiOutputMode::WebmVp9Alpha
             ? "video/webm" : "video/mp2t";
     }
@@ -2874,6 +2995,12 @@ std::string DlnaServer::MimeType(const MediaItem& item) const {
     if (ext == ".avi") return "video/x-msvideo";
     if (ext == ".mov") return "video/quicktime";
     if (ext == ".ts" || ext == ".m2ts") return "video/mp2t";
+    if (ext == ".vrm" || ext == ".glb") return "model/gltf-binary";
+    if (ext == ".gltf") return "model/gltf+json";
+    if (ext == ".json") return "application/json";
+    if (ext == ".png") return "image/png";
+    if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
+    if (ext == ".webp") return "image/webp";
     return "application/octet-stream";
 }
 
@@ -2900,6 +3027,11 @@ std::string DlnaServer::DlnaContentFeatures() const {
 }
 
 std::string DlnaServer::DlnaProtocolInfo(const MediaItem* item) const {
+    if (item && !item->is_video) {
+        return "http-get:*:" + MimeType(*item) +
+            ":DLNA.ORG_OP=01;DLNA.ORG_CI=0;"
+            "DLNA.ORG_FLAGS=01700000000000000000000000000000";
+    }
     if (item || ai_passthrough_) {
         const std::string mime = item
             ? MimeType(*item)
@@ -2961,6 +3093,24 @@ const DlnaServer::MediaItem* DlnaServer::FindMediaItemByObjectId(
     } catch (...) {
         return nullptr;
     }
+}
+
+const DlnaServer::DirectoryItem* DlnaServer::FindDirectoryItemByObjectId(
+    const std::string& object_id) const {
+    const auto found = std::find_if(
+        directory_items_.begin(), directory_items_.end(),
+        [&](const DirectoryItem& item) { return item.id == object_id; });
+    return found == directory_items_.end() ? nullptr : &*found;
+}
+
+size_t DlnaServer::DirectChildCount(const std::string& parent_id) const {
+    const size_t directoryCount = static_cast<size_t>(std::count_if(
+        directory_items_.begin(), directory_items_.end(),
+        [&](const DirectoryItem& item) { return item.parent_id == parent_id; }));
+    const size_t fileCount = static_cast<size_t>(std::count_if(
+        media_items_.begin(), media_items_.end(),
+        [&](const MediaItem& item) { return item.parent_id == parent_id; }));
+    return directoryCount + fileCount;
 }
 
 std::string DlnaServer::DeviceDescriptionXml() const {
@@ -3108,28 +3258,57 @@ std::string DlnaServer::BrowseSoapResponse(const std::string& object_id,
         "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" "
         "xmlns:dlna=\"urn:schemas-dlna-org:metadata-1-0/\">";
 
+    auto appendContainer = [this](std::ostringstream& d,
+                                  const DirectoryItem& directory) {
+        d << "<container id=\"" << XmlEscape(directory.id)
+          << "\" parentID=\"" << XmlEscape(directory.parent_id)
+          << "\" restricted=\"1\" searchable=\"0\" childCount=\""
+          << DirectChildCount(directory.id) << "\">"
+          << "<dc:title>"
+          << XmlEscape(WideToUtf8(directory.path.filename().wstring()))
+          << "</dc:title>"
+          << "<upnp:class>object.container.storageFolder</upnp:class>"
+          << "</container>";
+    };
+
     auto appendItem = [this](std::ostringstream& d, const MediaItem& item) {
         d << "<item id=\"" << item.id
-          << "\" parentID=\"0\" restricted=\"1\">"
+          << "\" parentID=\"" << XmlEscape(item.parent_id)
+          << "\" restricted=\"1\">"
           << "<dc:title>" << XmlEscape(DisplayTitle(item)) << "</dc:title>"
-          << "<upnp:class>object.item.videoItem.movie</upnp:class>"
+          << "<upnp:class>"
+          << (item.is_video ? "object.item.videoItem.movie" : "object.item")
+          << "</upnp:class>"
           << "<res protocolInfo=\"" << XmlEscape(DlnaProtocolInfo(&item)) << "\"";
         // For AI passthrough, generic fixed-muxrate MPEG-TS uses the same
         // virtual size model as HEAD/GET/Range. r800zzvrplayer keeps its
         // established stream-only metadata.
         uint64_t advertisedSize = item.size;
-        if (ai_passthrough_ &&
+        if (ai_passthrough_ && item.is_video &&
             ai_output_mode_ != AiOutputMode::WebmVp9Alpha) {
             advertisedSize = RealtimeTsVirtualSizeBytes(item.duration_ms);
         }
         if (advertisedSize > 0 &&
-            (!ai_passthrough_ || !g_r800zz_vrplayer_request)) {
+            (!ai_passthrough_ || !item.is_video || !g_r800zz_vrplayer_request)) {
             d << " size=\"" << advertisedSize << "\"";
         }
         if (item.duration_ms > 0) {
             d << " duration=\"" << FormatDlnaDuration(item.duration_ms) << "\"";
         }
         d << ">" << XmlEscape(MediaUrl(item)) << "</res></item>";
+    };
+
+    auto pathNameLess = [](const std::filesystem::path& left,
+                           const std::filesystem::path& right) {
+        std::wstring a = left.filename().wstring();
+        std::wstring b = right.filename().wstring();
+        std::transform(a.begin(), a.end(), a.begin(), [](wchar_t c) {
+            return static_cast<wchar_t>(std::towlower(c));
+        });
+        std::transform(b.begin(), b.end(), b.begin(), [](wchar_t c) {
+            return static_cast<wchar_t>(std::towlower(c));
+        });
+        return a < b;
     };
 
     std::ostringstream didl;
@@ -3139,19 +3318,26 @@ std::string DlnaServer::BrowseSoapResponse(const std::string& object_id,
 
     if (metadata && object_id == "0") {
         didl << "<container id=\"0\" parentID=\"-1\" restricted=\"1\" "
-             << "searchable=\"0\" childCount=\"" << media_items_.size() << "\">"
+             << "searchable=\"0\" childCount=\"" << DirectChildCount("0") << "\">"
              << "<dc:title>r800zzXRdlnaServer</dc:title>"
              << "<upnp:class>object.container</upnp:class></container>";
         numberReturned = 1;
         totalMatches = 1;
     } else if (metadata) {
-        const MediaItem* item = FindMediaItemByObjectId(object_id);
-        if (item) {
+        if (const DirectoryItem* directory =
+                FindDirectoryItemByObjectId(object_id)) {
+            appendContainer(didl, *directory);
+            numberReturned = 1;
+            totalMatches = 1;
+        } else if (const MediaItem* item =
+                       FindMediaItemByObjectId(object_id)) {
             appendItem(didl, *item);
             numberReturned = 1;
             totalMatches = 1;
         }
-    } else if (object_id == "0") {
+    } else if (response_action == "Search") {
+        // Preserve the previous Search behavior: Search exposes the complete
+        // selected file set even though BrowseDirectChildren is hierarchical.
         totalMatches = media_items_.size();
         const size_t begin = std::min(starting_index, media_items_.size());
         size_t end = media_items_.size();
@@ -3161,6 +3347,54 @@ std::string DlnaServer::BrowseSoapResponse(const std::string& object_id,
         for (size_t i = begin; i < end; ++i) {
             appendItem(didl, media_items_[i]);
             ++numberReturned;
+        }
+    } else {
+        std::string parentId;
+        if (object_id == "0") {
+            parentId = "0";
+        } else if (const DirectoryItem* directory =
+                       FindDirectoryItemByObjectId(object_id)) {
+            parentId = directory->id;
+        }
+
+        if (!parentId.empty()) {
+            std::vector<const DirectoryItem*> directories;
+            std::vector<const MediaItem*> files;
+            for (const auto& directory : directory_items_) {
+                if (directory.parent_id == parentId) {
+                    directories.push_back(&directory);
+                }
+            }
+            for (const auto& item : media_items_) {
+                if (item.parent_id == parentId) {
+                    files.push_back(&item);
+                }
+            }
+
+            std::sort(directories.begin(), directories.end(),
+                      [&](const DirectoryItem* left, const DirectoryItem* right) {
+                          return pathNameLess(left->path, right->path);
+                      });
+            std::sort(files.begin(), files.end(),
+                      [&](const MediaItem* left, const MediaItem* right) {
+                          return pathNameLess(left->path, right->path);
+                      });
+
+            totalMatches = directories.size() + files.size();
+            const size_t begin = std::min(starting_index, totalMatches);
+            size_t end = totalMatches;
+            if (requested_count > 0) {
+                end = std::min(end, begin + requested_count);
+            }
+
+            for (size_t index = begin; index < end; ++index) {
+                if (index < directories.size()) {
+                    appendContainer(didl, *directories[index]);
+                } else {
+                    appendItem(didl, *files[index - directories.size()]);
+                }
+                ++numberReturned;
+            }
         }
     }
     didl << "</DIDL-Lite>";
