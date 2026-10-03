@@ -2,8 +2,12 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
-## Ver 0.4 : 修复了即使是 NVIDIA GPU 也仅支持部分型号的问题。
-## Ver 0.4 : 通过 DirectML 增加了对非 NVIDIA GPU 的支持。
+### Ver 0.5 : 添加了 WebXR HTTPS 服务器。（可以运行存储在 PC 上的 WebXR 游戏。）
+### Ver 0.5 : DLNA 支持分层目录浏览。
+### Ver 0.5 : AI 文件转换支持选择 GPU。
+### Ver 0.5 : 改进了视频播放器的 GPU 处理。
+### Ver 0.4 : 修复了即使是 NVIDIA GPU 也仅支持部分型号的问题。
+### Ver 0.4 : 通过 DirectML 增加了对非 NVIDIA GPU 的支持。
 
 用于 PICO、Meta Quest 和其他兼容设备上播放 XR 视频的 Windows DLNA 服务器，支持实时 AI 背景移除（RVM）、Alpha/色键输出和视频转换。
 
