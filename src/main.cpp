@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cstdlib>
 #include <cstdint>
 #include <cwchar>
@@ -23,6 +24,7 @@
 #include "imgui_impl_win32.h"
 
 #include "dlna_server.h"
+#include "webxr_https_server.h"
 #include "../resources/resource.h"
 
 static ID3D11Device* g_pd3dDevice = nullptr;
@@ -211,10 +213,13 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
-static std::filesystem::path SelectVideoFolder(HWND owner) {
+static std::filesystem::path SelectVideoFolder(
+        HWND owner, bool videoFilesOnly = true) {
     BROWSEINFOW browse{};
     browse.hwndOwner = owner;
-    browse.lpszTitle = L"Select the folder containing video files";
+    browse.lpszTitle = videoFilesOnly
+        ? L"Select the folder containing video files"
+        : L"Select the folder containing files to publish";
     browse.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
     PIDLIST_ABSOLUTE item = SHBrowseForFolderW(&browse);
     if (!item) return {};
@@ -225,19 +230,23 @@ static std::filesystem::path SelectVideoFolder(HWND owner) {
     return {};
 }
 
-static std::filesystem::path SelectVideoFile(HWND owner) {
+static std::filesystem::path SelectVideoFile(
+        HWND owner, bool videoFilesOnly = true) {
     wchar_t file[32768]{};
     OPENFILENAMEW dialog{};
     dialog.lStructSize = sizeof(dialog);
     dialog.hwndOwner = owner;
-    dialog.lpstrFilter =
-        L"Video files\0*.mp4;*.m4v;*.webm;*.mkv;*.avi;*.mov;*.ts;*.m2ts\0"
-        L"All files\0*.*\0";
+    dialog.lpstrFilter = videoFilesOnly
+        ? L"Video files\0*.mp4;*.m4v;*.webm;*.mkv;*.avi;*.mov;*.ts;*.m2ts\0"
+          L"All files\0*.*\0"
+        : L"All files\0*.*\0";
     dialog.lpstrFile = file;
     dialog.nMaxFile = static_cast<DWORD>(std::size(file));
     dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST |
                    OFN_EXPLORER | OFN_NOCHANGEDIR;
-    dialog.lpstrTitle = L"Select a video file";
+    dialog.lpstrTitle = videoFilesOnly
+        ? L"Select a video file"
+        : L"Select a file to publish";
     if (GetOpenFileNameW(&dialog)) return std::filesystem::path(file);
     return {};
 }
@@ -247,6 +256,7 @@ struct UiStrings {
     const char* noFolder;
     const char* selectFile;
     const char* clearFiles;
+    const char* videoFilesOnly;
     const char* videoPlayer;
     const char* stopPlayer;
     const char* playerRunning;
@@ -254,6 +264,7 @@ struct UiStrings {
     const char* address;
     const char* noAddress;
     const char* refresh;
+    const char* copyUrl;
     const char* aiPassthrough;
     const char* aiMode;
     const char* alpha;
@@ -263,6 +274,8 @@ struct UiStrings {
     const char* selectInput;
     const char* noInput;
     const char* conversionFormat;
+    const char* conversionBackend;
+    const char* conversionDevice;
     const char* convert;
     const char* cancel;
     const char* outputFrames;
@@ -273,73 +286,114 @@ struct UiStrings {
     const char* log;
     const char* copyLog;
     const char* clearLog;
+    const char* webxrSection;
+    const char* webxrRoot;
+    const char* webxrOpenFolder;
+    const char* webxrStart;
+    const char* webxrStop;
+    const char* webxrStatus;
+    const char* webxrHttps;
+    const char* webxrCopyUrl;
+    const char* webxrRootCa;
+    const char* webxrInstallCaHint;
+    const char* webxrServeHint;
+    const char* webxrRunning;
+    const char* webxrStopped;
 };
 
 static const UiStrings& GetUiStrings(int language) {
     static const UiStrings strings[] = {
-        {"Select Video Folder...", "No folder selected", "Select Video File...", "Clear Individual Files",
+        {"Select Folder...", "No folder selected", "Select File...", "Clear Individual Files", "Video files only",
          "Video Player...", "Stop Video Player", "Video Player: Running",
          "Audio playback; controls and seek bar are in the player window",
-         "Advertised IPv4 address:", "No LAN IPv4 address found", "Refresh IPs",
+         "DLNA server URL:", "No LAN IPv4 address found", "Refresh IPs", "Copy URL",
          "AI Passthrough", "AI Passthrough Mode:", "Alpha", "Chroma Key", "Alpha Format",
          "Convert Video File", "Select Conversion Input...", "No conversion input selected",
-         "Conversion Format", "Convert Video...", "Cancel Conversion", "Output frames",
+         "Conversion Format", "Conversion Backend:", "Conversion GPU:", "Convert Video...", "Cancel Conversion", "Output frames",
          "Start DLNA Server", "Stop DLNA Server", "Status", "Allow access on your private network if Windows Firewall asks.",
-         "Log", "Copy Log", "Log Clear"},
-        {"Выбрать папку с видео...", "Папка не выбрана", "Выбрать видеофайл...", "Очистить выбранные файлы",
+         "Log", "Copy Log", "Log Clear",
+         "WebXR HTTPS Server", "Web root:", "Open WebXR Folder", "Start WebXR HTTPS", "Stop WebXR HTTPS",
+         "WebXR:", "HTTPS:", "Copy WebXR URL", "Root CA:",
+         "Install the Root CA on the HMD once, then open the HTTPS URL.",
+         "Serves files from the WebXR folder. Ports: 8443-8463.", "Running", "Stopped"},
+        {"Выбрать папку...", "Папка не выбрана", "Выбрать файл...", "Очистить выбранные файлы", "Только видеофайлы",
          "Видеоплеер...", "Остановить видеоплеер", "Видеоплеер: работает",
          "Звук, элементы управления и полоса поиска находятся в окне плеера",
-         "Объявляемый IPv4-адрес:", "IPv4-адрес LAN не найден", "Обновить IP",
+         "URL DLNA-сервера:", "IPv4-адрес LAN не найден", "Обновить IP", "Копировать URL",
          "ИИ-прозрачность", "Режим ИИ-прозрачности:", "Альфа", "Хромакей", "Формат альфа",
          "Преобразование видеофайла", "Выбрать исходное видео...", "Исходное видео не выбрано",
-         "Формат преобразования", "Преобразовать...", "Отменить преобразование", "Выходные кадры",
+         "Формат преобразования", "Бэкенд преобразования:", "GPU преобразования:", "Преобразовать...", "Отменить преобразование", "Выходные кадры",
          "Запустить DLNA-сервер", "Остановить DLNA-сервер", "Состояние", "Разрешите доступ в частной сети, если спросит брандмауэр Windows.",
-         "Журнал", "Копировать журнал", "Очистить журнал"},
-        {"Seleccionar carpeta de vídeos...", "Ninguna carpeta seleccionada", "Seleccionar archivo de vídeo...", "Borrar archivos individuales",
+         "Журнал", "Копировать журнал", "Очистить журнал",
+         "Сервер WebXR HTTPS", "Web-папка:", "Открыть папку WebXR", "Запустить WebXR HTTPS", "Остановить WebXR HTTPS",
+         "WebXR:", "HTTPS:", "Копировать WebXR URL", "Корневой CA:",
+         "Один раз установите корневой CA на HMD, затем откройте HTTPS URL.",
+         "Файлы из папки WebXR. Порты: 8443-8463.", "Работает", "Остановлен"},
+        {"Seleccionar carpeta...", "Ninguna carpeta seleccionada", "Seleccionar archivo...", "Borrar archivos individuales", "Solo archivos de vídeo",
          "Reproductor de vídeo...", "Detener reproductor", "Reproductor: en ejecución",
          "El audio, los controles y la barra de búsqueda están en la ventana del reproductor",
-         "Dirección IPv4 anunciada:", "No se encontró una dirección IPv4 LAN", "Actualizar IP",
+         "URL del servidor DLNA:", "No se encontró una dirección IPv4 LAN", "Actualizar IP", "Copiar URL",
          "Transparencia por IA", "Modo de transparencia por IA:", "Alfa", "Croma", "Formato alfa",
          "Convertir archivo de vídeo", "Seleccionar vídeo de entrada...", "No se seleccionó vídeo de entrada",
-         "Formato de conversión", "Convertir vídeo...", "Cancelar conversión", "Fotogramas de salida",
+         "Formato de conversión", "Backend de conversión:", "GPU de conversión:", "Convertir vídeo...", "Cancelar conversión", "Fotogramas de salida",
          "Iniciar servidor DLNA", "Detener servidor DLNA", "Estado", "Permita el acceso a la red privada si lo solicita el Firewall de Windows.",
-         "Registro", "Copiar registro", "Borrar registro"},
-        {"เลือกโฟลเดอร์วิดีโอ...", "ยังไม่ได้เลือกโฟลเดอร์", "เลือกไฟล์วิดีโอ...", "ล้างไฟล์ที่เลือก",
+         "Registro", "Copiar registro", "Borrar registro",
+         "Servidor HTTPS WebXR", "Raíz web:", "Abrir carpeta WebXR", "Iniciar HTTPS WebXR", "Detener HTTPS WebXR",
+         "WebXR:", "HTTPS:", "Copiar URL WebXR", "CA raíz:",
+         "Instala una vez la CA raíz en el HMD y abre la URL HTTPS.",
+         "Sirve archivos de la carpeta WebXR. Puertos: 8443-8463.", "Activo", "Detenido"},
+        {"เลือกโฟลเดอร์...", "ยังไม่ได้เลือกโฟลเดอร์", "เลือกไฟล์...", "ล้างไฟล์ที่เลือก", "เฉพาะไฟล์วิดีโอ",
          "โปรแกรมเล่นวิดีโอ...", "หยุดโปรแกรมเล่น", "โปรแกรมเล่น: กำลังทำงาน",
          "เสียง ปุ่มควบคุม และแถบค้นหาอยู่ในหน้าต่างโปรแกรมเล่น",
-         "ที่อยู่ IPv4 ที่ประกาศ:", "ไม่พบที่อยู่ IPv4 ของ LAN", "รีเฟรช IP",
+         "URL เซิร์ฟเวอร์ DLNA:", "ไม่พบที่อยู่ IPv4 ของ LAN", "รีเฟรช IP", "คัดลอก URL",
          "AI Passthrough", "โหมด AI Passthrough:", "อัลฟา", "โครมาคีย์", "รูปแบบอัลฟา",
          "แปลงไฟล์วิดีโอ", "เลือกวิดีโอต้นฉบับ...", "ยังไม่ได้เลือกวิดีโอต้นฉบับ",
-         "รูปแบบการแปลง", "แปลงวิดีโอ...", "ยกเลิกการแปลง", "จำนวนเฟรมเอาต์พุต",
+         "รูปแบบการแปลง", "แบ็กเอนด์การแปลง:", "GPU สำหรับการแปลง:", "แปลงวิดีโอ...", "ยกเลิกการแปลง", "จำนวนเฟรมเอาต์พุต",
          "เริ่มเซิร์ฟเวอร์ DLNA", "หยุดเซิร์ฟเวอร์ DLNA", "สถานะ", "อนุญาตการเข้าถึงเครือข่ายส่วนตัวหาก Windows Firewall ถาม",
-         "บันทึก", "คัดลอกบันทึก", "ล้างบันทึก"},
-        {"选择视频文件夹...", "未选择文件夹", "选择视频文件...", "清除单独选择的文件",
+         "บันทึก", "คัดลอกบันทึก", "ล้างบันทึก",
+         "เซิร์ฟเวอร์ HTTPS WebXR", "โฟลเดอร์เว็บ:", "เปิดโฟลเดอร์ WebXR", "เริ่ม HTTPS WebXR", "หยุด HTTPS WebXR",
+         "WebXR:", "HTTPS:", "คัดลอก URL WebXR", "Root CA:",
+         "ติดตั้ง Root CA บน HMD ครั้งเดียว แล้วเปิด HTTPS URL",
+         "ให้บริการไฟล์จากโฟลเดอร์ WebXR พอร์ต: 8443-8463", "ทำงาน", "หยุด"},
+        {"选择文件夹...", "未选择文件夹", "选择文件...", "清除单独选择的文件", "仅视频文件",
          "视频播放器...", "停止视频播放器", "视频播放器：运行中",
          "声音、控制按钮和进度条位于播放器窗口内",
-         "公布的 IPv4 地址：", "未找到局域网 IPv4 地址", "刷新 IP",
+         "DLNA 服务器 URL：", "未找到局域网 IPv4 地址", "刷新 IP", "复制 URL",
          "AI 透视", "AI 透视模式：", "Alpha", "色键", "Alpha 格式",
          "转换视频文件", "选择转换输入...", "未选择转换输入",
-         "转换格式", "转换视频...", "取消转换", "输出帧数",
+         "转换格式", "转换后端：", "转换 GPU：", "转换视频...", "取消转换", "输出帧数",
          "启动 DLNA 服务器", "停止 DLNA 服务器", "状态", "如果 Windows 防火墙询问，请允许专用网络访问。",
-         "日志", "复制日志", "清除日志"},
-        {"비디오 폴더 선택...", "폴더를 선택하지 않음", "비디오 파일 선택...", "개별 파일 지우기",
+         "日志", "复制日志", "清除日志",
+         "WebXR HTTPS 服务器", "Web 根目录:", "打开 WebXR 文件夹", "启动 WebXR HTTPS", "停止 WebXR HTTPS",
+         "WebXR:", "HTTPS:", "复制 WebXR URL", "根 CA:",
+         "在 HMD 上安装一次根 CA，然后打开 HTTPS URL。",
+         "提供 WebXR 文件夹中的文件。端口: 8443-8463。", "运行中", "已停止"},
+        {"폴더 선택...", "폴더를 선택하지 않음", "파일 선택...", "개별 파일 지우기", "비디오 파일만",
          "비디오 플레이어...", "비디오 플레이어 중지", "비디오 플레이어: 실행 중",
          "오디오, 조작 버튼 및 탐색 막대는 플레이어 창 안에 있습니다",
-         "공개할 IPv4 주소:", "LAN IPv4 주소를 찾지 못함", "IP 새로 고침",
+         "DLNA 서버 URL:", "LAN IPv4 주소를 찾지 못함", "IP 새로 고침", "URL 복사",
          "AI 패스스루", "AI 패스스루 모드:", "알파", "크로마 키", "알파 형식",
          "비디오 파일 변환", "변환 입력 선택...", "변환 입력을 선택하지 않음",
-         "변환 형식", "비디오 변환...", "변환 취소", "출력 프레임",
+         "변환 형식", "변환 백엔드:", "변환 GPU:", "비디오 변환...", "변환 취소", "출력 프레임",
          "DLNA 서버 시작", "DLNA 서버 중지", "상태", "Windows 방화벽이 요청하면 개인 네트워크 액세스를 허용하십시오.",
-         "로그", "로그 복사", "로그 지우기"},
-        {"動画フォルダーを選択...", "フォルダー未選択", "動画ファイルを選択...", "個別選択を消去",
+         "로그", "로그 복사", "로그 지우기",
+         "WebXR HTTPS 서버", "웹 루트:", "WebXR 폴더 열기", "WebXR HTTPS 시작", "WebXR HTTPS 중지",
+         "WebXR:", "HTTPS:", "WebXR URL 복사", "루트 CA:",
+         "HMD에 루트 CA를 한 번 설치한 뒤 HTTPS URL을 여세요.",
+         "WebXR 폴더의 파일을 제공합니다. 포트: 8443-8463.", "실행 중", "중지됨"},
+        {"フォルダーを選択...", "フォルダー未選択", "ファイルを選択...", "個別選択を消去", "動画ファイルのみ",
          "ビデオプレイヤー...", "ビデオプレイヤーを停止", "ビデオプレイヤー：実行中",
          "音声・操作ボタン・シークバーはプレイヤーウィンドウ内にあります",
-         "公開するIPv4アドレス：", "LANのIPv4アドレスがありません", "IPを更新",
+         "DLNAサーバーURL：", "LANのIPv4アドレスがありません", "IPを更新", "URLをコピー",
          "AIパススルー", "AIパススルーモード：", "アルファ", "クロマキー", "アルファ形式",
          "動画ファイル変換", "変換元動画を選択...", "変換元動画未選択",
-         "変換形式", "動画を変換...", "変換を中止", "出力フレーム数",
+         "変換形式", "変換バックエンド：", "変換GPU：", "動画を変換...", "変換を中止", "出力フレーム数",
          "DLNAサーバーを開始", "DLNAサーバーを停止", "状態", "Windowsファイアウォールに表示された場合は、プライベートネットワークへのアクセスを許可してください。",
-         "ログ", "ログをコピー", "ログを消去"},
+         "ログ", "ログをコピー", "ログを消去",
+         "WebXR HTTPSサーバー", "Webルート:", "WebXRフォルダーを開く", "WebXR HTTPS開始", "WebXR HTTPS停止",
+         "WebXR:", "HTTPS:", "WebXR URLをコピー", "ルートCA:",
+         "HMDにルートCAを一度インストールし、HTTPS URLを開いてください。",
+         "WebXRフォルダー内のファイルを配信します。ポート: 8443-8463。", "実行中", "停止"},
     };
     return strings[std::clamp(language, 0, 6)];
 }
@@ -461,6 +515,333 @@ static std::filesystem::path MediaSelectionFilePath() {
     return settings.parent_path() / L"media_selection.txt";
 }
 
+static std::filesystem::path AiBackendSelectionFilePath() {
+    const std::filesystem::path settings = SettingsFilePath();
+    if (settings.empty()) return {};
+    return settings.parent_path() / L"ai_backend.txt";
+}
+
+static int LoadAiBackendSelection() {
+    const std::filesystem::path path = AiBackendSelectionFilePath();
+    if (path.empty()) return 0;
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return 0;
+
+    std::string value;
+    std::getline(stream, value);
+    if (!value.empty() && value.back() == '\r') value.pop_back();
+    if (value == "dml") return 1;
+    if (value == "cpu") return 2;
+    return 0;
+}
+
+static bool SaveAiBackendSelection(int backend) {
+    if (backend < 0 || backend > 2) return false;
+
+    const std::filesystem::path path = AiBackendSelectionFilePath();
+    if (path.empty()) return false;
+
+    std::error_code filesystemError;
+    std::filesystem::create_directories(path.parent_path(), filesystemError);
+    if (filesystemError) return false;
+
+    const char* value = backend == 1 ? "dml" : (backend == 2 ? "cpu" : "cuda");
+    std::filesystem::path temporary = path;
+    temporary += L".tmp";
+    {
+        std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+        if (!stream) return false;
+        stream << value << "\n";
+        stream.flush();
+        if (!stream) return false;
+    }
+
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    return true;
+}
+
+static std::filesystem::path DirectMlAdapterSelectionFilePath() {
+    const std::filesystem::path settings = SettingsFilePath();
+    if (settings.empty()) return {};
+    return settings.parent_path() / L"directml_adapter.txt";
+}
+
+struct SavedDirectMlAdapterSelection {
+    int adapterIndex{-1};
+    std::string name;
+    bool valid{false};
+};
+
+static SavedDirectMlAdapterSelection LoadDirectMlAdapterSelection() {
+    SavedDirectMlAdapterSelection result;
+    const std::filesystem::path path = DirectMlAdapterSelectionFilePath();
+    if (path.empty()) return result;
+
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return result;
+
+    std::string indexText;
+    if (!std::getline(stream, indexText)) return result;
+    if (!indexText.empty() && indexText.back() == '\r') indexText.pop_back();
+
+    char* end = nullptr;
+    const long parsed = std::strtol(indexText.c_str(), &end, 10);
+    if (end == indexText.c_str() || *end != '\0' || parsed < 0 ||
+        parsed > static_cast<long>(INT_MAX)) {
+        return result;
+    }
+
+    if (!std::getline(stream, result.name)) return result;
+    if (!result.name.empty() && result.name.back() == '\r') result.name.pop_back();
+    if (result.name.empty()) return result;
+
+    result.adapterIndex = static_cast<int>(parsed);
+    result.valid = true;
+    return result;
+}
+
+static bool SaveDirectMlAdapterSelection(
+        const std::vector<DirectMlUiAdapter>& adapters,
+        int choice) {
+    if (choice < 0 || choice >= static_cast<int>(adapters.size())) return false;
+
+    const std::filesystem::path path = DirectMlAdapterSelectionFilePath();
+    if (path.empty()) return false;
+
+    std::error_code filesystemError;
+    std::filesystem::create_directories(path.parent_path(), filesystemError);
+    if (filesystemError) return false;
+
+    const auto& adapter = adapters[static_cast<size_t>(choice)];
+    std::filesystem::path temporary = path;
+    temporary += L".tmp";
+    {
+        std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+        if (!stream) return false;
+        stream << adapter.index << "\n" << adapter.name << "\n";
+        stream.flush();
+        if (!stream) return false;
+    }
+
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    return true;
+}
+
+static std::filesystem::path ConversionBackendSelectionFilePath() {
+    const std::filesystem::path settings = SettingsFilePath();
+    if (settings.empty()) return {};
+    return settings.parent_path() / L"conversion_backend.txt";
+}
+
+static int LoadConversionBackendSelection() {
+    const std::filesystem::path path = ConversionBackendSelectionFilePath();
+    if (path.empty()) return 0;
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return 0;
+
+    std::string value;
+    std::getline(stream, value);
+    if (!value.empty() && value.back() == '\r') value.pop_back();
+    if (value == "dml") return 1;
+    if (value == "cpu") return 2;
+    return 0;
+}
+
+static bool SaveConversionBackendSelection(int backend) {
+    if (backend < 0 || backend > 2) return false;
+    const std::filesystem::path path = ConversionBackendSelectionFilePath();
+    if (path.empty()) return false;
+
+    std::error_code filesystemError;
+    std::filesystem::create_directories(path.parent_path(), filesystemError);
+    if (filesystemError) return false;
+
+    const char* value = backend == 1 ? "dml" : (backend == 2 ? "cpu" : "cuda");
+    std::filesystem::path temporary = path;
+    temporary += L".tmp";
+    {
+        std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+        if (!stream) return false;
+        stream << value << "\n";
+        stream.flush();
+        if (!stream) return false;
+    }
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    return true;
+}
+
+static std::filesystem::path ConversionDirectMlAdapterSelectionFilePath() {
+    const std::filesystem::path settings = SettingsFilePath();
+    if (settings.empty()) return {};
+    return settings.parent_path() / L"conversion_directml_adapter.txt";
+}
+
+static SavedDirectMlAdapterSelection LoadConversionDirectMlAdapterSelection() {
+    SavedDirectMlAdapterSelection result;
+    const std::filesystem::path path = ConversionDirectMlAdapterSelectionFilePath();
+    if (path.empty()) return result;
+
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return result;
+
+    std::string indexText;
+    if (!std::getline(stream, indexText)) return result;
+    if (!indexText.empty() && indexText.back() == '\r') indexText.pop_back();
+
+    char* end = nullptr;
+    const long parsed = std::strtol(indexText.c_str(), &end, 10);
+    if (end == indexText.c_str() || *end != '\0' || parsed < 0 ||
+        parsed > static_cast<long>(INT_MAX)) {
+        return result;
+    }
+    if (!std::getline(stream, result.name)) return result;
+    if (!result.name.empty() && result.name.back() == '\r') result.name.pop_back();
+    if (result.name.empty()) return result;
+
+    result.adapterIndex = static_cast<int>(parsed);
+    result.valid = true;
+    return result;
+}
+
+static bool SaveConversionDirectMlAdapterSelection(
+        const std::vector<DirectMlUiAdapter>& adapters,
+        int choice) {
+    if (choice < 0 || choice >= static_cast<int>(adapters.size())) return false;
+    const std::filesystem::path path = ConversionDirectMlAdapterSelectionFilePath();
+    if (path.empty()) return false;
+
+    std::error_code filesystemError;
+    std::filesystem::create_directories(path.parent_path(), filesystemError);
+    if (filesystemError) return false;
+
+    const auto& adapter = adapters[static_cast<size_t>(choice)];
+    std::filesystem::path temporary = path;
+    temporary += L".tmp";
+    {
+        std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+        if (!stream) return false;
+        stream << adapter.index << "\n" << adapter.name << "\n";
+        stream.flush();
+        if (!stream) return false;
+    }
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    return true;
+}
+
+static std::filesystem::path AiStreamModeSelectionFilePath() {
+    const std::filesystem::path settings = SettingsFilePath();
+    if (settings.empty()) return {};
+    return settings.parent_path() / L"ai_passthrough_mode.txt";
+}
+
+static int LoadAiStreamModeSelection() {
+    const std::filesystem::path path = AiStreamModeSelectionFilePath();
+    if (path.empty()) return -1;
+
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return -1;
+
+    std::string value;
+    std::getline(stream, value);
+    if (!value.empty() && value.back() == '\r') value.pop_back();
+    if (value == "alpha-packed") return 0;
+    if (value == "webm-alpha") return 1;
+    if (value == "chroma-key") return 2;
+    if (value == "off") return 3;
+    return -1;
+}
+
+static bool SaveAiStreamModeSelection(int mode) {
+    if (mode < 0 || mode > 3) return false;
+
+    const std::filesystem::path path = AiStreamModeSelectionFilePath();
+    if (path.empty()) return false;
+
+    std::error_code filesystemError;
+    std::filesystem::create_directories(path.parent_path(), filesystemError);
+    if (filesystemError) return false;
+
+    const char* value = mode == 0 ? "alpha-packed" :
+        (mode == 1 ? "webm-alpha" : (mode == 2 ? "chroma-key" : "off"));
+    std::filesystem::path temporary = path;
+    temporary += L".tmp";
+    {
+        std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+        if (!stream) return false;
+        stream << value << "\n";
+        stream.flush();
+        if (!stream) return false;
+    }
+
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    return true;
+}
+
+static std::filesystem::path VideoFilesOnlySelectionFilePath() {
+    const std::filesystem::path settings = SettingsFilePath();
+    if (settings.empty()) return {};
+    return settings.parent_path() / L"video_files_only.txt";
+}
+
+static bool LoadVideoFilesOnlySelection() {
+    const std::filesystem::path path = VideoFilesOnlySelectionFilePath();
+    if (path.empty()) return true;
+
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return true;
+
+    std::string value;
+    std::getline(stream, value);
+    if (!value.empty() && value.back() == '\r') value.pop_back();
+    return value != "off";
+}
+
+static bool SaveVideoFilesOnlySelection(bool enabled) {
+    const std::filesystem::path path = VideoFilesOnlySelectionFilePath();
+    if (path.empty()) return false;
+
+    std::error_code filesystemError;
+    std::filesystem::create_directories(path.parent_path(), filesystemError);
+    if (filesystemError) return false;
+
+    std::filesystem::path temporary = path;
+    temporary += L".tmp";
+    {
+        std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+        if (!stream) return false;
+        stream << (enabled ? "on\n" : "off\n");
+        stream.flush();
+        if (!stream) return false;
+    }
+
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    return true;
+}
+
 static bool SaveMediaSelection(
         const std::filesystem::path& folder,
         const std::vector<std::filesystem::path>& individualFiles) {
@@ -525,7 +906,7 @@ static void LoadMediaSelection(
             }
         } else if (line[0] == 'I') {
             if (std::filesystem::is_regular_file(candidate, filesystemError) &&
-                !filesystemError && DlnaServer::IsMediaFile(candidate)) {
+                !filesystemError) {
                 const auto duplicate = std::find_if(
                     individualFiles.begin(), individualFiles.end(),
                     [&](const std::filesystem::path& existing) {
@@ -701,7 +1082,8 @@ struct ConversionProcess {
     HANDLE process = nullptr;
     DWORD lastExitCode = 0;
     bool completed = false;
-    bool usedGpu = false;
+    AiBackend backend = AiBackend::NvidiaCuda;
+    int directmlDevice = 0;
     std::filesystem::path output;
     std::filesystem::path logFile;
     std::string error;
@@ -782,7 +1164,8 @@ struct ConversionProcess {
     bool Start(const std::filesystem::path& input,
                const std::filesystem::path& outputFile,
                AiOutputMode mode,
-               bool gpuAvailable) {
+               AiBackend selectedBackend,
+               int selectedDirectMlDevice) {
         if (IsRunning()) return false;
         completed = false;
         lastExitCode = STILL_ACTIVE;
@@ -792,39 +1175,50 @@ struct ConversionProcess {
         output = outputFile;
         logFile = outputFile;
         logFile += L".conversion.log";
-        usedGpu = gpuAvailable;
+        backend = selectedBackend;
+        directmlDevice = selectedDirectMlDevice;
 
         const auto dir = ExecutableDirectory();
-        std::filesystem::path application;
-        std::wstring command;
-        if (gpuAvailable) {
-            application = dir / L"r800zz_ai_worker.exe";
-            const auto model = dir / L"rvm_mobilenetv3_fp16.onnx";
-            if (!std::filesystem::is_regular_file(application) ||
-                !std::filesystem::is_regular_file(model)) {
-                error = "GPU worker or RVM model is missing beside the server executable.";
-                return false;
-            }
-            command = QuoteWindowsArgument(application.wstring()) + L" " +
-                      QuoteWindowsArgument(input.wstring()) + L" --model " +
-                      QuoteWindowsArgument(model.wstring()) +
-                      L" --device 0 --qp 20 --start-ms 0 --output-mode " +
-                      ConversionModeName(mode) + L" --convert-output " +
-                      QuoteWindowsArgument(outputFile.wstring()) + L" --no-preview";
+        const std::filesystem::path application = dir / L"r800zz_ai_worker.exe";
+        const std::filesystem::path model = dir /
+            (selectedBackend == AiBackend::NvidiaCuda
+                ? L"rvm_mobilenetv3_fp16.onnx"
+                : L"rvm_mobilenetv3_fp32.onnx");
+        if (!std::filesystem::is_regular_file(application) ||
+            !std::filesystem::is_regular_file(model)) {
+            error = selectedBackend == AiBackend::NvidiaCuda
+                ? "CUDA worker or FP16 RVM model is missing beside the server executable."
+                : "Worker or FP32 RVM model is missing beside the server executable.";
+            return false;
+        }
+
+        std::wstring command =
+            QuoteWindowsArgument(application.wstring()) + L" " +
+            QuoteWindowsArgument(input.wstring());
+
+        if (selectedBackend == AiBackend::NvidiaCuda) {
+            // Keep the existing CUDA offline-conversion command unchanged.
+            command += L" --model " + QuoteWindowsArgument(model.wstring()) +
+                       L" --device 0 --qp 20 --start-ms 0 --output-mode " +
+                       std::wstring(ConversionModeName(mode)) +
+                       L" --convert-output " +
+                       QuoteWindowsArgument(outputFile.wstring()) +
+                       L" --no-preview";
         } else {
-            application = dir / L"r800zz_ai_worker.exe";
-            const auto model = dir / L"rvm_mobilenetv3_fp32.onnx";
-            if (!std::filesystem::is_regular_file(application) ||
-                !std::filesystem::is_regular_file(model)) {
-                error = "C++ worker or CPU FP32 RVM model is missing beside the server executable.";
-                return false;
+            // DirectML/CPU offline conversion uses the DML backend parser:
+            //   worker <input> <output> --backend dml|cpu ...
+            // The positional output argument enables offlineConvert there.
+            command += L" " + QuoteWindowsArgument(outputFile.wstring()) +
+                       L" --backend " +
+                       (selectedBackend == AiBackend::DirectML ? L"dml" : L"cpu") +
+                       L" --model " + QuoteWindowsArgument(model.wstring());
+            if (selectedBackend == AiBackend::DirectML) {
+                command += L" --device " +
+                           std::to_wstring(selectedDirectMlDevice);
             }
-            command = QuoteWindowsArgument(application.wstring()) + L" " +
-                      QuoteWindowsArgument(input.wstring()) + L" --model " +
-                      QuoteWindowsArgument(model.wstring()) +
-                      L" --cpu --qp 20 --output-mode " +
-                      ConversionModeName(mode) + L" --convert-output " +
-                      QuoteWindowsArgument(outputFile.wstring()) + L" --no-preview";
+            command += L" --qp 20 --start-ms 0 --output-mode " +
+                       std::wstring(ConversionModeName(mode)) +
+                       L" --no-preview";
         }
 
         std::vector<wchar_t> mutableCommand(command.begin(), command.end());
@@ -916,7 +1310,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                    L"R800ZZDlnaServerWindow", nullptr};
     RegisterClassExW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName,
-                              L"r800zzXRdlnaServer 0.4",
+                              L"r800zzXRdlnaServer 0.5",
                               WS_OVERLAPPEDWINDOW, 100, 100, 820, 720,
                               nullptr, nullptr, wc.hInstance, nullptr);
 
@@ -1002,30 +1396,49 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
     DlnaServer server;
+    WebXrHttpsServer webxrServer;
     VideoPlayerProcess videoPlayerProcess;
     ConversionProcess conversionProcess;
-    std::future<AiCapabilityResult> aiCapabilityFuture = std::async(
-        std::launch::async, []() {
-            try {
-                return DlnaServer::ProbeAiCapability();
-            } catch (const std::exception& error) {
-                return AiCapabilityResult{
-                    false,
-                    std::string("GPU capability check failed: ") + error.what() +
-                        ". Realtime AI passthrough is unavailable."
-                };
-            }
-        });
+    int ai_backend = LoadAiBackendSelection(); // 0=NVIDIA CUDA, 1=DirectML, 2=CPU
+    const int saved_ai_stream_mode = LoadAiStreamModeSelection();
+    std::future<AiCapabilityResult> aiCapabilityFuture;
+    bool aiCapabilityProbeStarted = false;
     bool aiCapabilityChecked = false;
     bool aiCapabilityAvailable = false;
-    std::string aiCapabilityMessage = "Checking NVIDIA GPU support...";
+    std::string aiCapabilityMessage = "NVIDIA CUDA capability check not started.";
+    auto startCudaCapabilityProbe = [&]() {
+        if (aiCapabilityProbeStarted || aiCapabilityChecked) return;
+        aiCapabilityProbeStarted = true;
+        aiCapabilityMessage = "Checking NVIDIA GPU support...";
+        aiCapabilityFuture = std::async(
+            std::launch::async, []() {
+                try {
+                    return DlnaServer::ProbeAiCapability();
+                } catch (const std::exception& error) {
+                    return AiCapabilityResult{
+                        false,
+                        std::string("GPU capability check failed: ") + error.what() +
+                            ". Realtime AI passthrough is unavailable."
+                    };
+                }
+            });
+    };
+    if (ai_backend == 0 && saved_ai_stream_mode != 3) {
+        startCudaCapabilityProbe();
+    }
+    bool video_files_only = LoadVideoFilesOnlySelection();
     std::filesystem::path selected_folder;
     std::vector<std::filesystem::path> folder_files;
     std::vector<std::filesystem::path> individually_selected_files;
+    std::vector<std::filesystem::path> active_individually_selected_files;
     std::vector<std::filesystem::path> selected_files;
+    std::filesystem::path first_selected_video;
     auto rebuildSelectedFiles = [&]() {
         selected_files = folder_files;
+        active_individually_selected_files.clear();
         for (const auto& file : individually_selected_files) {
+            if (!DlnaServer::IsShareableFile(file, video_files_only)) continue;
+            active_individually_selected_files.push_back(file);
             const auto duplicate = std::find_if(
                 selected_files.begin(), selected_files.end(),
                 [&](const std::filesystem::path& existing) {
@@ -1034,21 +1447,70 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 });
             if (duplicate == selected_files.end()) selected_files.push_back(file);
         }
+
+        first_selected_video.clear();
+        for (const auto& file : selected_files) {
+            if (DlnaServer::IsMediaFile(file)) {
+                first_selected_video = file;
+                break;
+            }
+        }
     };
     LoadMediaSelection(selected_folder, individually_selected_files);
     if (!selected_folder.empty()) {
-        folder_files = DlnaServer::FindMediaFiles(selected_folder);
+        folder_files = DlnaServer::FindFiles(
+            selected_folder, video_files_only);
     }
     rebuildSelectedFiles();
     std::vector<std::string> addresses = DlnaServer::GetLocalIPv4Addresses();
     int selected_address = addresses.empty() ? -1 : 0;
     // 0=Alpha packed, 1=Alpha WebM VP9, 2=Chroma Key, 3=OFF.
-    int ai_stream_mode = 3;
-    int ai_backend = 0; // 0=NVIDIA CUDA, 1=DirectML, 2=CPU
+    bool ai_stream_mode_has_saved_or_user_value = saved_ai_stream_mode >= 0;
+    int ai_stream_mode = ai_stream_mode_has_saved_or_user_value
+        ? saved_ai_stream_mode : 3;
     int previous_ai_backend = ai_backend;
     auto directml_adapters = EnumerateDirectMlAdapters();
     int directml_adapter_choice = directml_adapters.empty() ? -1 : 0;
+    if (!directml_adapters.empty()) {
+        const SavedDirectMlAdapterSelection savedAdapter =
+            LoadDirectMlAdapterSelection();
+        if (savedAdapter.valid) {
+            const auto match = std::find_if(
+                directml_adapters.begin(), directml_adapters.end(),
+                [&](const DirectMlUiAdapter& adapter) {
+                    return adapter.index == savedAdapter.adapterIndex &&
+                           adapter.name == savedAdapter.name;
+                });
+            if (match != directml_adapters.end()) {
+                directml_adapter_choice = static_cast<int>(
+                    std::distance(directml_adapters.begin(), match));
+            }
+        }
+    }
     int previous_directml_adapter_choice = directml_adapter_choice;
+
+    int conversion_backend = LoadConversionBackendSelection(); // independent of AI backend
+    int conversion_directml_adapter_choice = directml_adapters.empty() ? -1 : 0;
+    if (!directml_adapters.empty()) {
+        const SavedDirectMlAdapterSelection savedConversionAdapter =
+            LoadConversionDirectMlAdapterSelection();
+        if (savedConversionAdapter.valid) {
+            const auto match = std::find_if(
+                directml_adapters.begin(), directml_adapters.end(),
+                [&](const DirectMlUiAdapter& adapter) {
+                    return adapter.index == savedConversionAdapter.adapterIndex &&
+                           adapter.name == savedConversionAdapter.name;
+                });
+            if (match != directml_adapters.end()) {
+                conversion_directml_adapter_choice = static_cast<int>(
+                    std::distance(directml_adapters.begin(), match));
+            }
+        }
+    }
+    int previous_conversion_backend = conversion_backend;
+    int previous_conversion_directml_adapter_choice =
+        conversion_directml_adapter_choice;
+
     auto aiPassthroughEnabled = [&]() { return ai_stream_mode != 3; };
     auto selectedAiOutputMode = [&]() {
         if (ai_stream_mode == 1) return AiOutputMode::WebmVp9Alpha;
@@ -1067,12 +1529,37 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     auto refreshAiPrewarm = [&]() {
         const AiBackend backend = selectedAiBackend();
         const int device = selectedDirectMlDevice();
-        if (aiPassthroughEnabled() && !selected_files.empty()) {
-            server.SetAiPrewarm(true, selected_files.front(), backend, device);
-        } else {
+        if (!aiPassthroughEnabled() || first_selected_video.empty()) {
             server.SetAiPrewarm(false, {}, backend, device);
+            return;
         }
+
+        if (backend == AiBackend::NvidiaCuda) {
+            if (!aiCapabilityChecked) {
+                startCudaCapabilityProbe();
+                server.SetAiPrewarm(false, {}, backend, device);
+                return;
+            }
+            if (!aiCapabilityAvailable) {
+                server.SetAiPrewarm(false, {}, backend, device);
+                return;
+            }
+        }
+        server.SetAiPrewarm(true, first_selected_video, backend, device);
     };
+    if (ai_backend != 0) {
+        refreshAiPrewarm();
+    }
+    auto selectedConversionBackend = [&]() {
+        return conversion_backend == 0 ? AiBackend::NvidiaCuda :
+            (conversion_backend == 1 ? AiBackend::DirectML : AiBackend::Cpu);
+    };
+    auto selectedConversionDirectMlDevice = [&]() {
+        return (conversion_backend == 1 && conversion_directml_adapter_choice >= 0)
+            ? directml_adapters[static_cast<size_t>(conversion_directml_adapter_choice)].index
+            : 0;
+    };
+
     std::filesystem::path conversion_input;
     int conversion_mode = 0; // 0=Chroma Key, 1=WebM Alpha, 2=Alpha Packed
     bool resume_prewarm_after_conversion = false;
@@ -1105,7 +1592,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        if (!aiCapabilityChecked &&
+        if (aiCapabilityProbeStarted && !aiCapabilityChecked &&
+            aiCapabilityFuture.valid() &&
             aiCapabilityFuture.wait_for(std::chrono::seconds(0)) ==
                 std::future_status::ready) {
             const AiCapabilityResult result = aiCapabilityFuture.get();
@@ -1114,7 +1602,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             aiCapabilityMessage = result.message;
             // The probe is CUDA-specific. Do not force DirectML/CPU mode OFF
             // if the user changed backend while the async probe was running.
-            if (ai_backend == 0) ai_stream_mode = result.available ? 0 : 3;
+            if (ai_backend == 0) {
+                if (!result.available) {
+                    ai_stream_mode = 3;
+                } else if (!ai_stream_mode_has_saved_or_user_value) {
+                    // Preserve the legacy first-run behavior: CUDA starts in
+                    // Alpha packed only when no AI mode has ever been saved.
+                    ai_stream_mode = 0;
+                }
+            }
             server.RecordAiCapabilityResult(result);
             refreshAiPrewarm();
         }
@@ -1185,11 +1681,23 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             resume_prewarm_after_conversion = false;
         }
 
+        if (server.IsRunning()) ImGui::BeginDisabled();
+        if (ImGui::Checkbox(uiText.videoFilesOnly, &video_files_only)) {
+            SaveVideoFilesOnlySelection(video_files_only);
+            folder_files = selected_folder.empty()
+                ? std::vector<std::filesystem::path>{}
+                : DlnaServer::FindFiles(selected_folder, video_files_only);
+            rebuildSelectedFiles();
+            refreshAiPrewarm();
+        }
+        if (server.IsRunning()) ImGui::EndDisabled();
+
         if (ImGui::Button(uiText.selectFolder)) {
-            const auto path = SelectVideoFolder(hwnd);
+            const auto path = SelectVideoFolder(hwnd, video_files_only);
             if (!path.empty()) {
                 selected_folder = path;
-                folder_files = DlnaServer::FindMediaFiles(selected_folder);
+                folder_files = DlnaServer::FindFiles(
+                    selected_folder, video_files_only);
                 rebuildSelectedFiles();
                 SaveMediaSelection(selected_folder, individually_selected_files);
                 if (!server.IsRunning()) refreshAiPrewarm();
@@ -1199,14 +1707,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (selected_folder.empty()) {
             ImGui::TextDisabled("%s", uiText.noFolder);
         } else {
-            ImGui::TextWrapped("%s (%zu folder videos)",
+            ImGui::TextWrapped("%s (%zu folder files)",
                                WideToUtf8(selected_folder.wstring()).c_str(),
                                folder_files.size());
         }
 
         if (ImGui::Button(uiText.selectFile)) {
-            const auto path = SelectVideoFile(hwnd);
-            if (!path.empty() && DlnaServer::IsMediaFile(path)) {
+            const auto path = SelectVideoFile(hwnd, video_files_only);
+            if (!path.empty() &&
+                DlnaServer::IsShareableFile(path, video_files_only)) {
                 individually_selected_files.push_back(path);
                 rebuildSelectedFiles();
                 SaveMediaSelection(selected_folder, individually_selected_files);
@@ -1214,10 +1723,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             }
         }
         ImGui::SameLine();
-        ImGui::TextDisabled("%zu individual, %zu total video files",
-                            individually_selected_files.size(),
+        ImGui::TextDisabled("%zu individual, %zu total files",
+                            active_individually_selected_files.size(),
                             selected_files.size());
-        if (!individually_selected_files.empty()) {
+        if (!active_individually_selected_files.empty()) {
             ImGui::SameLine();
             if (ImGui::SmallButton(uiText.clearFiles)) {
                 individually_selected_files.clear();
@@ -1225,7 +1734,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 SaveMediaSelection(selected_folder, individually_selected_files);
                 if (!server.IsRunning()) refreshAiPrewarm();
             }
-            for (const auto& file : individually_selected_files) {
+            for (const auto& file : active_individually_selected_files) {
                 ImGui::TextWrapped("  Individual: %s",
                     WideToUtf8(file.wstring()).c_str());
             }
@@ -1259,21 +1768,45 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (addresses.empty()) {
             ImGui::TextDisabled("%s", uiText.noAddress);
         } else {
-            const char* preview = selected_address >= 0 ? addresses[static_cast<size_t>(selected_address)].c_str() : "";
-            if (ImGui::BeginCombo("##ip", preview)) {
+            std::string addressPreview;
+            if (server.IsRunning()) {
+                addressPreview = server.BaseUrl();
+            } else if (selected_address >= 0) {
+                addressPreview = addresses[static_cast<size_t>(selected_address)];
+            }
+
+            ImGui::SetNextItemWidth(360.0f);
+            const bool addressLocked = server.IsRunning() || webxrServer.IsRunning();
+            if (addressLocked) ImGui::BeginDisabled();
+            if (ImGui::BeginCombo("##ip", addressPreview.c_str())) {
                 for (int i = 0; i < static_cast<int>(addresses.size()); ++i) {
                     const bool selected = i == selected_address;
-                    if (ImGui::Selectable(addresses[static_cast<size_t>(i)].c_str(), selected)) selected_address = i;
+                    if (ImGui::Selectable(
+                            addresses[static_cast<size_t>(i)].c_str(), selected)) {
+                        selected_address = i;
+                    }
                     if (selected) ImGui::SetItemDefaultFocus();
                 }
                 ImGui::EndCombo();
             }
+            if (addressLocked) ImGui::EndDisabled();
         }
         ImGui::SameLine();
-        if (ImGui::Button(uiText.refresh) && !server.IsRunning()) {
+        const bool refreshAddressLocked = server.IsRunning() || webxrServer.IsRunning();
+        if (refreshAddressLocked) ImGui::BeginDisabled();
+        if (ImGui::Button(uiText.refresh)) {
             addresses = DlnaServer::GetLocalIPv4Addresses();
             selected_address = addresses.empty() ? -1 : 0;
         }
+        if (refreshAddressLocked) ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        const std::string baseUrl = server.IsRunning() ? server.BaseUrl() : std::string{};
+        if (baseUrl.empty()) ImGui::BeginDisabled();
+        if (ImGui::Button(uiText.copyUrl) && !baseUrl.empty()) {
+            ImGui::SetClipboardText(baseUrl.c_str());
+        }
+        if (baseUrl.empty()) ImGui::EndDisabled();
 
         ImGui::Spacing();
         ImGui::TextUnformatted("AI Backend:");
@@ -1303,6 +1836,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
         if (ai_backend != previous_ai_backend ||
             directml_adapter_choice != previous_directml_adapter_choice) {
+            if (ai_backend != previous_ai_backend) {
+                SaveAiBackendSelection(ai_backend);
+            }
+            if (ai_backend == 1 && directml_adapter_choice >= 0) {
+                SaveDirectMlAdapterSelection(
+                    directml_adapters, directml_adapter_choice);
+            }
             refreshAiPrewarm();
             previous_ai_backend = ai_backend;
             previous_directml_adapter_choice = directml_adapter_choice;
@@ -1311,7 +1851,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         ImGui::TextUnformatted(uiText.aiMode);
         const int previousAiStreamMode = ai_stream_mode;
         const bool aiChoicesDisabled = server.IsRunning() ||
-            (ai_backend == 0 && (!aiCapabilityChecked || !aiCapabilityAvailable));
+            (ai_backend == 0 && aiCapabilityChecked && !aiCapabilityAvailable);
         if (aiChoicesDisabled) ImGui::BeginDisabled();
         ImGui::RadioButton("Alpha packed", &ai_stream_mode, 0);
         ImGui::SameLine();
@@ -1325,34 +1865,52 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (server.IsRunning()) ImGui::EndDisabled();
 
         if (ai_stream_mode != previousAiStreamMode && !server.IsRunning()) {
+            ai_stream_mode_has_saved_or_user_value = true;
             refreshAiPrewarm();
         }
 
-        if (!aiCapabilityChecked) {
-            ImGui::TextDisabled("GPU: Checking...");
-        } else if (!aiCapabilityAvailable) {
-            ImGui::TextDisabled(
-                "GPU: Unavailable - raw DLNA and CPU file conversion available");
-        } else if (aiPassthroughEnabled()) {
-            if (selected_files.empty()) {
-                ImGui::TextDisabled("RVM: Select a video folder or file");
+        if (ai_backend == 0) {
+            if (!aiCapabilityChecked) {
+                ImGui::TextDisabled("NVIDIA CUDA: Checking...");
+            } else if (!aiCapabilityAvailable) {
+                ImGui::TextDisabled(
+                    "NVIDIA CUDA: Unavailable - raw DLNA and CPU file conversion available");
+            } else if (aiPassthroughEnabled()) {
+                if (first_selected_video.empty()) {
+                    ImGui::TextDisabled("RVM: No selected video; non-video files are served raw");
+                } else {
+                    ImGui::TextDisabled("RVM: %s", server.IsAiPrewarmReady() ? "Ready" : "Warming up");
+                }
             } else {
-                ImGui::TextDisabled("RVM: %s", server.IsAiPrewarmReady() ? "Ready" : "Warming up");
+                ImGui::TextDisabled("NVIDIA CUDA: Available");
+            }
+            if (aiCapabilityChecked && !aiCapabilityAvailable) {
+                ImGui::TextWrapped("%s", aiCapabilityMessage.c_str());
+            }
+        } else if (ai_backend == 1) {
+            if (directml_adapters.empty()) {
+                ImGui::TextDisabled("DirectML: No hardware DXGI adapters found");
+            } else if (aiPassthroughEnabled()) {
+                if (first_selected_video.empty()) {
+                    ImGui::TextDisabled("RVM: No selected video; non-video files are served raw");
+                } else {
+                    ImGui::TextDisabled("RVM: %s", server.IsAiPrewarmReady() ? "Ready" : "Warming up");
+                }
+            } else {
+                ImGui::TextDisabled("DirectML: Selected");
             }
         } else {
-            ImGui::TextDisabled("GPU: Available");
-        }
-
-        if (aiCapabilityChecked && !aiCapabilityAvailable) {
-            ImGui::TextWrapped("%s", aiCapabilityMessage.c_str());
+            ImGui::TextDisabled("CPU backend: Selected");
         }
 
         ImGui::Spacing();
         if (!server.IsRunning()) {
-          const bool backendReady =
-            ai_backend == 0
-                ? aiCapabilityChecked
-                : (ai_backend == 1 ? directml_adapter_choice >= 0 : true);
+          const bool aiNeedsBackend =
+            aiPassthroughEnabled() && !first_selected_video.empty();
+          const bool backendReady = !aiNeedsBackend ||
+            (ai_backend == 0
+                ? (aiCapabilityChecked && aiCapabilityAvailable)
+                : (ai_backend == 1 ? directml_adapter_choice >= 0 : true));
           const bool can_start = backendReady &&
             !selected_files.empty() && selected_address >= 0 && !conversionRunning;
 
@@ -1371,7 +1929,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                     aiEnabled,
                     selectedAiOutputMode(),
                     selectedAiBackend(),
-                    selectedDirectMlDevice());
+                    selectedDirectMlDevice(),
+                    video_files_only);
             }
             ImGui::PopStyleColor(3);
             if (!can_start) ImGui::EndDisabled();
@@ -1393,8 +1952,71 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
         if (server.IsRunning()) {
             ImGui::Text("DLNA name: r800zzXRdlnaServer");
-            ImGui::Text("HTTP: http://%s:%u/media/<id>", server.AdvertisedIp().c_str(), server.Port());
+            ImGui::Text("HTTP: %s", server.BaseUrl().c_str());
             ImGui::TextWrapped("%s", uiText.firewall);
+        }
+
+        ImGui::SeparatorText(uiText.webxrSection);
+        const std::filesystem::path webxrRoot = webxrServer.RootDirectory();
+        ImGui::TextWrapped("%s %s", uiText.webxrRoot,
+            WideToUtf8(webxrRoot.wstring()).c_str());
+        if (ImGui::Button(uiText.webxrOpenFolder)) {
+            std::error_code webxrDirectoryError;
+            std::filesystem::create_directories(webxrRoot, webxrDirectoryError);
+            if (!webxrDirectoryError) {
+                ShellExecuteW(nullptr, L"open", webxrRoot.c_str(),
+                              nullptr, nullptr, SW_SHOWNORMAL);
+            }
+        }
+        ImGui::SameLine();
+        if (!webxrServer.IsRunning()) {
+            if (selected_address < 0) ImGui::BeginDisabled();
+            if (ImGui::Button(uiText.webxrStart, ImVec2(210, 0)) &&
+                selected_address >= 0) {
+                webxrServer.Start(addresses[static_cast<size_t>(selected_address)]);
+            }
+            if (selected_address < 0) ImGui::EndDisabled();
+        } else {
+            if (ImGui::Button(uiText.webxrStop, ImVec2(210, 0))) {
+                webxrServer.Stop();
+            }
+        }
+        ImGui::SameLine();
+        const std::string webxrStatus = webxrServer.Status();
+        const char* webxrStatusText =
+            webxrStatus == "Running" ? uiText.webxrRunning :
+            (webxrStatus == "Stopped" ? uiText.webxrStopped : webxrStatus.c_str());
+        ImGui::Text("%s %s", uiText.webxrStatus, webxrStatusText);
+
+        if (webxrServer.IsRunning()) {
+            const std::string webxrUrl = webxrServer.BaseUrl();
+            ImGui::TextUnformatted(uiText.webxrHttps);
+            ImGui::SameLine();
+            ImGui::TextUnformatted(webxrUrl.c_str());
+            const bool webxrUrlHovered = ImGui::IsItemHovered();
+            const ImVec2 webxrLinkMin = ImGui::GetItemRectMin();
+            const ImVec2 webxrLinkMax = ImGui::GetItemRectMax();
+            ImGui::GetWindowDrawList()->AddLine(
+                ImVec2(webxrLinkMin.x, webxrLinkMax.y),
+                webxrLinkMax,
+                ImGui::GetColorU32(ImGuiCol_Text));
+            if (webxrUrlHovered) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                ImGui::SetTooltip("%s", webxrUrl.c_str());
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    const std::wstring webxrUrlWide = Utf8ToWide(webxrUrl);
+                    ShellExecuteW(nullptr, L"open", webxrUrlWide.c_str(),
+                                  nullptr, nullptr, SW_SHOWNORMAL);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(uiText.webxrCopyUrl)) {
+                ImGui::SetClipboardText(webxrUrl.c_str());
+            }
+            ImGui::TextWrapped("%s %s", uiText.webxrRootCa,
+                WideToUtf8(webxrServer.RootCertificateFile().wstring()).c_str());
+            ImGui::TextDisabled("%s", uiText.webxrInstallCaHint);
+            ImGui::TextDisabled("%s", uiText.webxrServeHint);
         }
 
         ImGui::SeparatorText(uiText.convertSection);
@@ -1405,6 +2027,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 conversion_input = path;
                 conversionProcess.completed = false;
                 conversionProcess.error.clear();
+                if (conversion_backend == 0) startCudaCapabilityProbe();
             }
         }
         if (conversionRunning) ImGui::EndDisabled();
@@ -1426,9 +2049,65 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                      static_cast<int>(std::size(conversionModes)));
         if (conversionRunning) ImGui::EndDisabled();
 
+        if (conversionRunning) ImGui::BeginDisabled();
+        ImGui::SetNextItemWidth(260.0f);
+        ImGui::Combo(uiText.conversionBackend, &conversion_backend,
+                     backendItems, 3);
+        if (conversion_backend == 1) {
+            if (directml_adapters.empty()) {
+                ImGui::TextDisabled("DirectML: No hardware DXGI adapters found");
+            } else {
+                conversion_directml_adapter_choice = std::clamp(
+                    conversion_directml_adapter_choice, 0,
+                    static_cast<int>(directml_adapters.size()) - 1);
+                const auto& current = directml_adapters[
+                    static_cast<size_t>(conversion_directml_adapter_choice)];
+                ImGui::SetNextItemWidth(360.0f);
+                if (ImGui::BeginCombo(uiText.conversionDevice, current.name.c_str())) {
+                    for (int i = 0; i < static_cast<int>(directml_adapters.size()); ++i) {
+                        const bool selected = i == conversion_directml_adapter_choice;
+                        const std::string label = "[" +
+                            std::to_string(directml_adapters[i].index) + "] " +
+                            directml_adapters[i].name;
+                        if (ImGui::Selectable(label.c_str(), selected)) {
+                            conversion_directml_adapter_choice = i;
+                        }
+                        if (selected) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+            }
+        }
+        if (conversionRunning) ImGui::EndDisabled();
+
+        if (conversion_backend != previous_conversion_backend ||
+            conversion_directml_adapter_choice !=
+                previous_conversion_directml_adapter_choice) {
+            if (conversion_backend != previous_conversion_backend) {
+                SaveConversionBackendSelection(conversion_backend);
+                if (conversion_backend == 0 && !conversion_input.empty()) {
+                    startCudaCapabilityProbe();
+                }
+            }
+            if (conversion_backend == 1 &&
+                conversion_directml_adapter_choice >= 0) {
+                SaveConversionDirectMlAdapterSelection(
+                    directml_adapters, conversion_directml_adapter_choice);
+            }
+            previous_conversion_backend = conversion_backend;
+            previous_conversion_directml_adapter_choice =
+                conversion_directml_adapter_choice;
+        }
+
         if (!conversionRunning) {
+            const bool conversionBackendReady =
+                conversion_backend == 0
+                    ? (aiCapabilityChecked && aiCapabilityAvailable)
+                    : (conversion_backend == 1
+                        ? conversion_directml_adapter_choice >= 0
+                        : true);
             const bool convertDisabled = conversion_input.empty() ||
-                !aiCapabilityChecked || server.IsRunning() || videoPlayerRunning;
+                !conversionBackendReady || server.IsRunning() || videoPlayerRunning;
             if (convertDisabled) ImGui::BeginDisabled();
             if (ImGui::Button(uiText.convert, ImVec2(180, 0))) {
                 const AiOutputMode mode = conversion_mode == 0
@@ -1445,7 +2124,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                     }
                     if (!conversionProcess.Start(
                             conversion_input, output, mode,
-                            aiCapabilityAvailable) &&
+                            selectedConversionBackend(),
+                            selectedConversionDirectMlDevice()) &&
                         resume_prewarm_after_conversion) {
                         refreshAiPrewarm();
                         resume_prewarm_after_conversion = false;
@@ -1459,17 +2139,35 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             }
         }
         ImGui::SameLine();
-        if (!aiCapabilityChecked) {
-            ImGui::TextDisabled("Backend: checking GPU...");
+        if (conversion_backend == 0) {
+            if (!aiCapabilityProbeStarted && !aiCapabilityChecked) {
+                ImGui::TextDisabled("Conversion: NVIDIA CUDA (check starts when input is selected)");
+            } else if (!aiCapabilityChecked) {
+                ImGui::TextDisabled("Conversion: checking NVIDIA CUDA...");
+            } else if (aiCapabilityAvailable) {
+                ImGui::TextDisabled("Conversion: NVIDIA CUDA device 0");
+            } else {
+                ImGui::TextDisabled("Conversion: NVIDIA CUDA unavailable");
+            }
+        } else if (conversion_backend == 1) {
+            if (conversion_directml_adapter_choice >= 0 &&
+                conversion_directml_adapter_choice < static_cast<int>(directml_adapters.size())) {
+                ImGui::TextDisabled("Conversion: DirectML [%d] %s",
+                    directml_adapters[static_cast<size_t>(
+                        conversion_directml_adapter_choice)].index,
+                    directml_adapters[static_cast<size_t>(
+                        conversion_directml_adapter_choice)].name.c_str());
+            } else {
+                ImGui::TextDisabled("Conversion: DirectML device unavailable");
+            }
         } else {
-            ImGui::TextDisabled("Backend: %s",
-                aiCapabilityAvailable
-                    ? "NVIDIA GPU (C++/CUDA)"
-                    : "CPU (C++/ONNX Runtime)" );
+            ImGui::TextDisabled("Conversion: CPU");
         }
         if (conversionRunning) {
-            ImGui::Text("Conversion: Running (%s)",
-                conversionProcess.usedGpu ? "NVIDIA GPU" : "CPU");
+            const char* runningBackend =
+                conversionProcess.backend == AiBackend::NvidiaCuda ? "NVIDIA CUDA" :
+                (conversionProcess.backend == AiBackend::DirectML ? "DirectML" : "CPU");
+            ImGui::Text("Conversion: Running (%s)", runningBackend);
             ImGui::Text("%s: %llu", uiText.outputFrames,
                 static_cast<unsigned long long>(conversionProcess.outputFrames));
             ImGui::TextWrapped("Output: %s",
@@ -1532,8 +2230,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         g_SwapChainOccluded = (present_result == DXGI_STATUS_OCCLUDED);
     }
 
+    SaveAiBackendSelection(ai_backend);
+    if (ai_backend == 1 && directml_adapter_choice >= 0) {
+        SaveDirectMlAdapterSelection(directml_adapters, directml_adapter_choice);
+    }
+    SaveAiStreamModeSelection(ai_stream_mode);
+    SaveVideoFilesOnlySelection(video_files_only);
+    SaveConversionBackendSelection(conversion_backend);
+    if (conversion_backend == 1 && conversion_directml_adapter_choice >= 0) {
+        SaveConversionDirectMlAdapterSelection(
+            directml_adapters, conversion_directml_adapter_choice);
+    }
     videoPlayerProcess.Stop();
     conversionProcess.Stop(false);
+    webxrServer.Stop();
     server.Stop();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
@@ -1546,4 +2256,5 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     CloseHandle(singleInstanceMutex);
     return 0;
 }
+
 
