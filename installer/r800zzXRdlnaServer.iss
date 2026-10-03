@@ -1,5 +1,5 @@
 #define MyAppName "r800zzXRdlnaServer"
-#define MyAppVersion "0.4"
+#define MyAppVersion "0.5"
 #define MyAppPublisher "R800ZZ"
 #define MyAppURL "https://vr180g.com/"
 #define MyAppExeName "r800zz_dlna_server.exe"
@@ -46,7 +46,7 @@ RestartApplications=no
 SetupLogging=yes
 
 ; Windows version metadata for the installer EXE.
-VersionInfoVersion=0.4.0.0
+VersionInfoVersion=0.5.0.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} installer
 VersionInfoProductName={#MyAppName}
@@ -61,6 +61,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; Do NOT recurse into bin\dml: that directory is stale output from the old
 ; dedicated DirectML worker path and contains duplicate/old runtime DLLs.
 Source: "..\build_cuda_ep\bin\*"; DestDir: "{app}"; Excludes: "*.pdb,*.ilk,*.exp,*.lib"; Flags: ignoreversion
+
+; Install the bundled WebXR application.
+Source: "..\build_cuda_ep\bin\webxr\index.html"; DestDir: "{app}\webxr"; Flags: ignoreversion
 
 ; Optional third-party license/notice files for public binary distribution.
 Source: "..\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
