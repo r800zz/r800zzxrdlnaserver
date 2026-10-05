@@ -33,6 +33,37 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
   <img src="./jpeg/webxr_demo.jpeg" alt="WebXR demo" width="487" height="388" border="2">
 </a>
 
+Ver 0.5ではHTTPSサーバーを追加しました。  
+このサーバーの目的は、PCに保存されているWebXRアプリを実行することです。  
+WebXRを使うと、VR/AR/XRアプリをウェブブラウザ上で実行できます。  
+自分でVRアプリを作成して自分で使いたい場合、WebXRはとても便利です。  
+VRアプリを作成するさまざまな方法の中でも、WebXRは最も簡単な方法のひとつです。  
+WebXRアプリは、`index.html` という1個のファイルだけで動かすこともできます。  
+しかし、HTTPSサーバーを設定する複雑さは、WebXRを利用するうえで大きな障壁のひとつです。  
+そこで、誰でも設定なしでHTTPSサーバーを簡単に利用できるようにしました。  
+ウェブブラウザで、次のようなURLを開きます。  
+`https://192.168.1.102:8443/`  
+URLは固定ではありません。PC、Wi-Fiルーター、その他のネットワーク機器を再起動すると変わる場合があります。  
+このURLはローカルネットワーク内でのみ使用でき、インターネット上には公開されません。  
+URLにファイル名を指定しなければ、サーバーは `index.html` を読み込みます。  
+たとえば `abcd.html` を開きたい場合は、次のようなURLを使います。  
+`https://192.168.1.102:8443/abcd.html`  
+`index.html` などのファイルは、次のようなフォルダーに保存されます。  
+`C:\Users\xxxx\AppData\Local\Program\r800zzXRdlnaServer\webxr\`  
+フォルダーのパスはアプリに表示されており、ボタンをクリックしてそのフォルダーを開くこともできます。  
+初心者の場合は、AIに次のように頼むだけでもよいでしょう。  
+`HTMLファイル1個だけを使ってWebXRアプリを作って。`  
+Ver 0.5の `index.html` にはVR迷路ゲームが入っています。  
+
+### 対応ウェブブラウザ
+
+- [R800ZZbrowser Gecko for PICO/Meta](https://vr180g.com/browser/browser.php?l=jp)  
+  （R800ZZbrowser Chromiumは、このWebXRサーバーでは動作しません。）
+- PICOブラウザ
+- Metaブラウザ
+- PCのFirefox / Chrome / Edgeなどのウェブブラウザ  
+  （一般的にARには対応していません。SteamVRが必要です。）
+
 ### 出力に対応するVR動画プレイヤー
 
 Green-screen MP4のクロマキー再生例:
