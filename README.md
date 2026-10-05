@@ -23,6 +23,16 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
   <img src="./jpeg/server_en.jpeg" alt="r800zzXRdlnaServer for Windows" width="402" height="356" border="2">
 </a>
 
+## WebXR server
+
+<a href="./jpeg/webxrserver_en.jpeg" target="_blank">
+  <img src="./jpeg/webxrserver_en.jpeg" alt="WebXR server" border="2">
+</a>  
+
+<a href="./jpeg/webxr_demo.jpeg" target="_blank">
+  <img src="./jpeg/webxr_demo.jpeg" alt="WebXR demo" width="487" height="388" border="2">
+</a>
+
 ### VR video players supporting the output
 
 For Green-screen MP4, examples of VR players with chroma-key functionality include:
