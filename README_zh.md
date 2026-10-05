@@ -57,7 +57,7 @@ Ver 0.5 的 `index.html` 中包含了一个 VR 迷宫游戏。
 
 ### 支持的网页浏览器
 
-- [R800ZZbrowser Gecko for PICO/Meta](https://vr180g.com/browser/browser.php?l=zh)  
+- [R800ZZbrowser Gecko for PICO/Meta](https://vr180g.com/browser/browser.php?l=cn)  
   （R800ZZbrowser Chromium 无法使用这个 WebXR 服务器。）
 - PICO Browser
 - Meta Browser
