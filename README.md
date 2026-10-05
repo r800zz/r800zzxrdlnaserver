@@ -33,6 +33,36 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
   <img src="./jpeg/webxr_demo.jpeg" alt="WebXR demo" width="487" height="388" border="2">
 </a>
 
+In Ver 0.5, I added an HTTPS server.  
+Its purpose is to run WebXR applications stored on your PC.  
+WebXR allows VR/AR/XR applications to run in a web browser.  
+If you want to create your own VR applications and play them yourself, WebXR is very convenient.  
+Among the many ways to create VR applications, WebXR is one of the easiest.  
+A WebXR application can even run from just a single file named `index.html`.  
+However, the complexity of setting up an HTTPS server is a major barrier to using WebXR.  
+I made the HTTPS server easy for anyone to use without any configuration.  
+Open a URL such as:  
+`https://192.168.1.102:8443/`  
+in a web browser.  
+The URL is not fixed. It may change after restarting your PC, Wi-Fi router, or other network equipment.  
+This URL can only be used on your local network and is not publicly exposed to the world.  
+If you do not specify a file name in the URL, the server loads `index.html`.  
+For example, if you want to open `abcd.html`, use a URL like:  
+`https://192.168.1.102:8443/abcd.html`  
+Files such as `index.html` are stored in a folder such as:  
+`C:\Users\xxxx\AppData\Local\Program\r800zzXRdlnaServer\webxr\`  
+The folder path is displayed in the application, and you can open the folder by clicking the button.  
+If you are a beginner, you can simply ask an AI:  
+`Create a WebXR application using only one HTML file.`  
+Ver 0.5 includes a VR maze game in `index.html`.
+### Supported Web Browsers
+- [R800ZZbrowser Gecko for PICO/Meta](https://vr180g.com/browser/browser.php?l=en)  
+  (R800ZZbrowser Chromium does not work with this WebXR server.)
+- PICO Browser
+- Meta Browser
+- PC web browsers such as Firefox / Chrome / Edge ...  
+  (AR is generally not supported. SteamVR is required.)
+
 ### VR video players supporting the output
 
 For Green-screen MP4, examples of VR players with chroma-key functionality include:
