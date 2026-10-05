@@ -23,7 +23,7 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
   <img src="./jpeg/server_en.jpeg" alt="r800zzXRdlnaServer for Windows" width="402" height="356" border="2">
 </a>
 
-## WebXR server
+## WebXR HTTPS server
 
 <a href="./jpeg/webxrserver_en.jpeg" target="_blank">
   <img src="./jpeg/webxrserver_en.jpeg" alt="WebXR server" border="2">
