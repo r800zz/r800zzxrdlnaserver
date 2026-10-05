@@ -23,6 +23,16 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
   <img src="./jpeg/server_th.jpeg" alt="r800zzXRdlnaServer for Windows" width="402" height="356" border="2">
 </a>
 
+## เซิร์ฟเวอร์ HTTPS WebXR
+
+<a href="./jpeg/webxrserver_th.jpeg" target="_blank">
+  <img src="./jpeg/webxrserver_th.jpeg" alt="WebXR server" border="2">
+</a>  
+
+<a href="./jpeg/webxr_demo.jpeg" target="_blank">
+  <img src="./jpeg/webxr_demo.jpeg" alt="WebXR demo" width="487" height="388" border="2">
+</a>
+
 ### โปรแกรมเล่นวิดีโอ VR ที่รองรับ
 
 Green-screen MP4:
