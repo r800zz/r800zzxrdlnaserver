@@ -33,6 +33,37 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
   <img src="./jpeg/webxr_demo.jpeg" alt="WebXR demo" width="487" height="388" border="2">
 </a>
 
+Ver 0.5 中增加了 HTTPS 服务器。  
+它的用途是运行存放在 PC 上的 WebXR 应用。  
+WebXR 可以让 VR/AR/XR 应用在网页浏览器中运行。  
+如果你想自己制作 VR 应用并自己使用，WebXR 非常方便。  
+在众多制作 VR 应用的方法中，WebXR 是最简单的方法之一。  
+WebXR 应用甚至可以只使用一个名为 `index.html` 的文件运行。  
+但是，HTTPS 服务器设置的复杂性一直是使用 WebXR 的主要障碍之一。  
+我让任何人都可以无需配置就轻松使用 HTTPS 服务器。  
+在网页浏览器中打开类似下面的 URL：  
+`https://192.168.1.102:8443/`  
+这个 URL 不是固定的。重新启动 PC、Wi-Fi 路由器或其他网络设备后，它可能会发生变化。  
+这个 URL 只能在本地网络中使用，并不会公开到互联网。  
+如果 URL 中没有指定文件名，服务器会读取 `index.html`。  
+例如，如果想打开 `abcd.html`，可以使用类似下面的 URL：  
+`https://192.168.1.102:8443/abcd.html`  
+`index.html` 等文件存放在类似下面的文件夹中：  
+`C:\Users\xxxx\AppData\Local\Program\r800zzXRdlnaServer\webxr\`  
+应用程序中会显示该文件夹的路径，也可以点击按钮直接打开该文件夹。  
+如果你是初学者，可以直接对 AI 说：  
+`只使用一个 HTML 文件制作一个 WebXR 应用。`  
+Ver 0.5 的 `index.html` 中包含了一个 VR 迷宫游戏。
+
+### 支持的网页浏览器
+
+- [R800ZZbrowser Gecko for PICO/Meta](https://vr180g.com/browser/browser.php?l=jp)  
+  （R800ZZbrowser Chromium 无法使用这个 WebXR 服务器。）
+- PICO Browser
+- Meta Browser
+- PC 上的 Firefox / Chrome / Edge 等网页浏览器  
+  （通常不支持 AR。需要 SteamVR。）
+
 ### 支持输出格式的 VR 视频播放器
 
 Green-screen MP4:
