@@ -23,6 +23,16 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
   <img src="./jpeg/server_zh.jpeg" alt="r800zzXRdlnaServer for Windows" width="402" height="356" border="2">
 </a>
 
+## WebXR HTTPS 服务器
+
+<a href="./jpeg/webxrserver_zh.jpeg" target="_blank">
+  <img src="./jpeg/webxrserver_zh.jpeg" alt="WebXR server" border="2">
+</a>  
+
+<a href="./jpeg/webxr_demo.jpeg" target="_blank">
+  <img src="./jpeg/webxr_demo.jpeg" alt="WebXR demo" width="487" height="388" border="2">
+</a>
+
 ### 支持输出格式的 VR 视频播放器
 
 Green-screen MP4:
