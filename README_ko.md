@@ -33,6 +33,38 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
   <img src="./jpeg/webxr_demo.jpeg" alt="WebXR demo" width="487" height="388" border="2">
 </a>
 
+Ver 0.5에서는 HTTPS 서버를 추가했습니다.  
+이 서버의 목적은 PC에 저장된 WebXR 애플리케이션을 실행하는 것입니다.  
+WebXR을 사용하면 VR/AR/XR 애플리케이션을 웹 브라우저에서 실행할 수 있습니다.  
+직접 VR 애플리케이션을 만들어 직접 사용하려는 경우 WebXR은 매우 편리합니다.  
+여러 VR 애플리케이션 제작 방법 중에서 WebXR은 가장 쉬운 방법 중 하나입니다.  
+WebXR 애플리케이션은 `index.html`이라는 파일 하나만으로도 실행할 수 있습니다.  
+하지만 HTTPS 서버를 설정하는 복잡함은 WebXR을 사용하는 데 큰 장벽 중 하나입니다.  
+누구나 별도의 설정 없이 HTTPS 서버를 쉽게 사용할 수 있도록 만들었습니다.  
+웹 브라우저에서 다음과 같은 URL을 엽니다.  
+`https://192.168.1.102:8443/`  
+URL은 고정되어 있지 않습니다. PC, Wi-Fi 라우터 또는 기타 네트워크 장치를 다시 시작하면 변경될 수 있습니다.  
+이 URL은 로컬 네트워크 안에서만 사용할 수 있으며 인터넷에 공개되지 않습니다.  
+URL에 파일 이름을 지정하지 않으면 서버는 `index.html`을 불러옵니다.  
+예를 들어 `abcd.html`을 열려면 다음과 같은 URL을 사용합니다.  
+`https://192.168.1.102:8443/abcd.html`  
+`index.html`과 같은 파일은 다음과 같은 폴더에 저장됩니다.  
+`C:\Users\xxxx\AppData\Local\Program\r800zzXRdlnaServer\webxr\`  
+폴더 경로는 애플리케이션에 표시되며 버튼을 클릭하여 해당 폴더를 열 수 있습니다.  
+초보자라면 AI에게 다음과 같이 요청하면 됩니다.  
+`HTML 파일 하나만 사용해서 WebXR 애플리케이션을 만들어 줘.`  
+Ver 0.5의 `index.html`에는 VR 미로 게임이 포함되어 있습니다.
+
+### 지원 웹 브라우저
+
+- [R800ZZbrowser Gecko for PICO/Meta](https://vr180g.com/browser/browser.php?l=kr)  
+  (R800ZZbrowser Chromium은 이 WebXR 서버에서 작동하지 않습니다.)
+- PICO Browser
+- Meta Browser
+- PC의 Firefox / Chrome / Edge 등의 웹 브라우저  
+  (일반적으로 AR은 지원되지 않습니다. SteamVR이 필요합니다.)
+
+
 ### 출력 형식을 지원하는 VR 비디오 플레이어
 
 Green-screen MP4:
