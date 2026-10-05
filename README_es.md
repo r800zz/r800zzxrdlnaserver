@@ -33,6 +33,35 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
   <img src="./jpeg/webxr_demo.jpeg" alt="WebXR demo" width="487" height="388" border="2">
 </a>
 
+En la Ver 0.5 añadí un servidor HTTPS.  
+Su propósito es ejecutar aplicaciones WebXR almacenadas en tu PC.  
+WebXR permite ejecutar aplicaciones VR/AR/XR en un navegador web.  
+Si quieres crear tus propias aplicaciones de VR y usarlas tú mismo, WebXR es muy práctico.  
+Entre las muchas formas de crear aplicaciones de VR, WebXR es una de las más sencillas.  
+Una aplicación WebXR puede funcionar incluso con un solo archivo llamado `index.html`.  
+Sin embargo, la complejidad de configurar un servidor HTTPS es una de las principales barreras para utilizar WebXR.  
+He hecho que el servidor HTTPS sea fácil de usar para cualquiera y sin necesidad de configuración.  
+Abre en un navegador web una URL como:  
+`https://192.168.1.102:8443/`  
+La URL no es fija. Puede cambiar después de reiniciar el PC, el router Wi-Fi u otros equipos de red.  
+Esta URL solo puede utilizarse dentro de tu red local y no está publicada en Internet.  
+Si no especificas un nombre de archivo en la URL, el servidor carga `index.html`.  
+Por ejemplo, si quieres abrir `abcd.html`, utiliza una URL como:  
+`https://192.168.1.102:8443/abcd.html`  
+Los archivos como `index.html` se guardan en una carpeta como:  
+`C:\Users\xxxx\AppData\Local\Program\r800zzXRdlnaServer\webxr\`  
+La ruta de la carpeta se muestra en la aplicación y puedes abrirla haciendo clic en el botón.  
+Si eres principiante, simplemente puedes pedirle a una IA:  
+`Crea una aplicación WebXR usando solo un archivo HTML.`  
+La Ver 0.5 incluye un juego de laberinto VR en `index.html`.
+### Navegadores web compatibles
+- [R800ZZbrowser Gecko for PICO/Meta](https://vr180g.com/browser/browser.php?l=es)  
+  (R800ZZbrowser Chromium no funciona con este servidor WebXR.)
+- PICO Browser
+- Meta Browser
+- Navegadores web de PC como Firefox / Chrome / Edge ...  
+  (Generalmente no son compatibles con AR. Se requiere SteamVR.)
+
 ### Reproductores de vídeo VR compatibles con la salida
 
 Para MP4 con pantalla verde:
