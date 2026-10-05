@@ -23,6 +23,16 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
   <img src="./jpeg/server_ja.jpeg" alt="r800zzXRdlnaServer for Windows" width="402" height="356" border="2">
 </a>
 
+## WebXR HTTPSサーバー
+
+<a href="./jpeg/webxrserver_ja.jpeg" target="_blank">
+  <img src="./jpeg/webxrserver_ja.jpeg" alt="WebXR server" border="2">
+</a>  
+
+<a href="./jpeg/webxr_demo.jpeg" target="_blank">
+  <img src="./jpeg/webxr_demo.jpeg" alt="WebXR demo" width="487" height="388" border="2">
+</a>
+
 ### 出力に対応するVR動画プレイヤー
 
 Green-screen MP4のクロマキー再生例:
