@@ -47,7 +47,9 @@ public:
             return false;
         }
 
-        root_directory_ = ExecutableDirectory() / L"webxr";
+        if (root_directory_.empty()) {
+            root_directory_ = ExecutableDirectory() / L"webxr";
+        }
         std::error_code ec;
         std::filesystem::create_directories(root_directory_, ec);
         if (ec) {
@@ -202,6 +204,29 @@ public:
     std::filesystem::path RootDirectory() const {
         if (!root_directory_.empty()) return root_directory_;
         return ExecutableDirectory() / L"webxr";
+    }
+
+    bool SetRootDirectory(const std::filesystem::path& rootDirectory) {
+        if (IsRunning() || rootDirectory.empty()) return false;
+
+        std::error_code ec;
+        std::filesystem::path normalized =
+            std::filesystem::absolute(rootDirectory, ec).lexically_normal();
+        if (ec) return false;
+
+        ec.clear();
+        if (!std::filesystem::is_directory(normalized, ec) || ec) return false;
+
+        root_directory_ = normalized;
+        root_certificate_file_.clear();
+        return true;
+    }
+
+    bool ResetRootDirectory() {
+        if (IsRunning()) return false;
+        root_directory_.clear();
+        root_certificate_file_.clear();
+        return true;
     }
 
     std::filesystem::path RootCertificateFile() const {
@@ -1165,3 +1190,4 @@ private:
     mutable std::mutex state_mutex_;
     std::string status_{"Stopped"};
 };
+

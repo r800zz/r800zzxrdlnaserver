@@ -230,6 +230,20 @@ static std::filesystem::path SelectVideoFolder(
     return {};
 }
 
+static std::filesystem::path SelectWebXrRootFolder(HWND owner) {
+    BROWSEINFOW browse{};
+    browse.hwndOwner = owner;
+    browse.lpszTitle = L"Select the WebXR public folder";
+    browse.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    PIDLIST_ABSOLUTE item = SHBrowseForFolderW(&browse);
+    if (!item) return {};
+    wchar_t folder[MAX_PATH]{};
+    const BOOL ok = SHGetPathFromIDListW(item, folder);
+    CoTaskMemFree(item);
+    if (ok) return std::filesystem::path(folder);
+    return {};
+}
+
 static std::filesystem::path SelectVideoFile(
         HWND owner, bool videoFilesOnly = true) {
     wchar_t file[32768]{};
@@ -289,6 +303,8 @@ struct UiStrings {
     const char* webxrSection;
     const char* webxrRoot;
     const char* webxrOpenFolder;
+    const char* webxrChangeFolder;
+    const char* webxrResetFolder;
     const char* webxrStart;
     const char* webxrStop;
     const char* webxrStatus;
@@ -312,7 +328,7 @@ static const UiStrings& GetUiStrings(int language) {
          "Conversion Format", "Conversion Backend:", "Conversion GPU:", "Convert Video...", "Cancel Conversion", "Output frames",
          "Start DLNA Server", "Stop DLNA Server", "Status", "Allow access on your private network if Windows Firewall asks.",
          "Log", "Copy Log", "Log Clear",
-         "WebXR HTTPS Server", "Web root:", "Open WebXR Folder", "Start WebXR HTTPS", "Stop WebXR HTTPS",
+         "WebXR HTTPS Server", "Web root:", "Open WebXR Folder", "Change WebXR Folder...", "Reset WebXR Folder", "Start WebXR HTTPS", "Stop WebXR HTTPS",
          "WebXR:", "HTTPS:", "Copy WebXR URL", "Root CA:",
          "Install the Root CA on the HMD once, then open the HTTPS URL.",
          "Serves files from the WebXR folder. Ports: 8443-8463.", "Running", "Stopped"},
@@ -325,7 +341,7 @@ static const UiStrings& GetUiStrings(int language) {
          "Формат преобразования", "Бэкенд преобразования:", "GPU преобразования:", "Преобразовать...", "Отменить преобразование", "Выходные кадры",
          "Запустить DLNA-сервер", "Остановить DLNA-сервер", "Состояние", "Разрешите доступ в частной сети, если спросит брандмауэр Windows.",
          "Журнал", "Копировать журнал", "Очистить журнал",
-         "Сервер WebXR HTTPS", "Web-папка:", "Открыть папку WebXR", "Запустить WebXR HTTPS", "Остановить WebXR HTTPS",
+         "Сервер WebXR HTTPS", "Web-папка:", "Открыть папку WebXR", "Изменить папку WebXR...", "Сбросить папку WebXR", "Запустить WebXR HTTPS", "Остановить WebXR HTTPS",
          "WebXR:", "HTTPS:", "Копировать WebXR URL", "Корневой CA:",
          "Один раз установите корневой CA на HMD, затем откройте HTTPS URL.",
          "Файлы из папки WebXR. Порты: 8443-8463.", "Работает", "Остановлен"},
@@ -338,7 +354,7 @@ static const UiStrings& GetUiStrings(int language) {
          "Formato de conversión", "Backend de conversión:", "GPU de conversión:", "Convertir vídeo...", "Cancelar conversión", "Fotogramas de salida",
          "Iniciar servidor DLNA", "Detener servidor DLNA", "Estado", "Permita el acceso a la red privada si lo solicita el Firewall de Windows.",
          "Registro", "Copiar registro", "Borrar registro",
-         "Servidor HTTPS WebXR", "Raíz web:", "Abrir carpeta WebXR", "Iniciar HTTPS WebXR", "Detener HTTPS WebXR",
+         "Servidor HTTPS WebXR", "Raíz web:", "Abrir carpeta WebXR", "Cambiar carpeta WebXR...", "Restablecer carpeta WebXR", "Iniciar HTTPS WebXR", "Detener HTTPS WebXR",
          "WebXR:", "HTTPS:", "Copiar URL WebXR", "CA raíz:",
          "Instala una vez la CA raíz en el HMD y abre la URL HTTPS.",
          "Sirve archivos de la carpeta WebXR. Puertos: 8443-8463.", "Activo", "Detenido"},
@@ -351,7 +367,7 @@ static const UiStrings& GetUiStrings(int language) {
          "รูปแบบการแปลง", "แบ็กเอนด์การแปลง:", "GPU สำหรับการแปลง:", "แปลงวิดีโอ...", "ยกเลิกการแปลง", "จำนวนเฟรมเอาต์พุต",
          "เริ่มเซิร์ฟเวอร์ DLNA", "หยุดเซิร์ฟเวอร์ DLNA", "สถานะ", "อนุญาตการเข้าถึงเครือข่ายส่วนตัวหาก Windows Firewall ถาม",
          "บันทึก", "คัดลอกบันทึก", "ล้างบันทึก",
-         "เซิร์ฟเวอร์ HTTPS WebXR", "โฟลเดอร์เว็บ:", "เปิดโฟลเดอร์ WebXR", "เริ่ม HTTPS WebXR", "หยุด HTTPS WebXR",
+         "เซิร์ฟเวอร์ HTTPS WebXR", "โฟลเดอร์เว็บ:", "เปิดโฟลเดอร์ WebXR", "เปลี่ยนโฟลเดอร์ WebXR...", "รีเซ็ตโฟลเดอร์ WebXR", "เริ่ม HTTPS WebXR", "หยุด HTTPS WebXR",
          "WebXR:", "HTTPS:", "คัดลอก URL WebXR", "Root CA:",
          "ติดตั้ง Root CA บน HMD ครั้งเดียว แล้วเปิด HTTPS URL",
          "ให้บริการไฟล์จากโฟลเดอร์ WebXR พอร์ต: 8443-8463", "ทำงาน", "หยุด"},
@@ -364,7 +380,7 @@ static const UiStrings& GetUiStrings(int language) {
          "转换格式", "转换后端：", "转换 GPU：", "转换视频...", "取消转换", "输出帧数",
          "启动 DLNA 服务器", "停止 DLNA 服务器", "状态", "如果 Windows 防火墙询问，请允许专用网络访问。",
          "日志", "复制日志", "清除日志",
-         "WebXR HTTPS 服务器", "Web 根目录:", "打开 WebXR 文件夹", "启动 WebXR HTTPS", "停止 WebXR HTTPS",
+         "WebXR HTTPS 服务器", "Web 根目录:", "打开 WebXR 文件夹", "更改 WebXR 文件夹...", "重置 WebXR 文件夹", "启动 WebXR HTTPS", "停止 WebXR HTTPS",
          "WebXR:", "HTTPS:", "复制 WebXR URL", "根 CA:",
          "在 HMD 上安装一次根 CA，然后打开 HTTPS URL。",
          "提供 WebXR 文件夹中的文件。端口: 8443-8463。", "运行中", "已停止"},
@@ -377,7 +393,7 @@ static const UiStrings& GetUiStrings(int language) {
          "변환 형식", "변환 백엔드:", "변환 GPU:", "비디오 변환...", "변환 취소", "출력 프레임",
          "DLNA 서버 시작", "DLNA 서버 중지", "상태", "Windows 방화벽이 요청하면 개인 네트워크 액세스를 허용하십시오.",
          "로그", "로그 복사", "로그 지우기",
-         "WebXR HTTPS 서버", "웹 루트:", "WebXR 폴더 열기", "WebXR HTTPS 시작", "WebXR HTTPS 중지",
+         "WebXR HTTPS 서버", "웹 루트:", "WebXR 폴더 열기", "WebXR 폴더 변경...", "WebXR 폴더 초기화", "WebXR HTTPS 시작", "WebXR HTTPS 중지",
          "WebXR:", "HTTPS:", "WebXR URL 복사", "루트 CA:",
          "HMD에 루트 CA를 한 번 설치한 뒤 HTTPS URL을 여세요.",
          "WebXR 폴더의 파일을 제공합니다. 포트: 8443-8463.", "실행 중", "중지됨"},
@@ -390,7 +406,7 @@ static const UiStrings& GetUiStrings(int language) {
          "変換形式", "変換バックエンド：", "変換GPU：", "動画を変換...", "変換を中止", "出力フレーム数",
          "DLNAサーバーを開始", "DLNAサーバーを停止", "状態", "Windowsファイアウォールに表示された場合は、プライベートネットワークへのアクセスを許可してください。",
          "ログ", "ログをコピー", "ログを消去",
-         "WebXR HTTPSサーバー", "Webルート:", "WebXRフォルダーを開く", "WebXR HTTPS開始", "WebXR HTTPS停止",
+         "WebXR HTTPSサーバー", "Webルート:", "WebXRフォルダーを開く", "WebXRフォルダーを変更...", "WebXRフォルダーをリセット", "WebXR HTTPS開始", "WebXR HTTPS停止",
          "WebXR:", "HTTPS:", "WebXR URLをコピー", "ルートCA:",
          "HMDにルートCAを一度インストールし、HTTPS URLを開いてください。",
          "WebXRフォルダー内のファイルを配信します。ポート: 8443-8463。", "実行中", "停止"},
@@ -795,6 +811,75 @@ static bool SaveAiStreamModeSelection(int mode) {
         return false;
     }
     return true;
+}
+
+static std::filesystem::path WebXrRootSelectionFilePath() {
+    const std::filesystem::path settings = SettingsFilePath();
+    if (settings.empty()) return {};
+    return settings.parent_path() / L"webxr_root.txt";
+}
+
+static std::filesystem::path LoadWebXrRootSelection() {
+    const std::filesystem::path path = WebXrRootSelectionFilePath();
+    if (path.empty()) return {};
+
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return {};
+
+    std::string value;
+    std::getline(stream, value);
+    if (!value.empty() && value.back() == '\r') value.pop_back();
+    if (value.empty()) return {};
+
+    const std::wstring wideValue = Utf8ToWide(value);
+    if (wideValue.empty()) return {};
+
+    const std::filesystem::path candidate(wideValue);
+    std::error_code filesystemError;
+    if (!std::filesystem::is_directory(candidate, filesystemError) ||
+        filesystemError) {
+        return {};
+    }
+
+    std::filesystem::path normalized =
+        std::filesystem::absolute(candidate, filesystemError).lexically_normal();
+    if (filesystemError) return candidate.lexically_normal();
+    return normalized;
+}
+
+static bool SaveWebXrRootSelection(const std::filesystem::path& root) {
+    if (root.empty()) return false;
+
+    const std::filesystem::path path = WebXrRootSelectionFilePath();
+    if (path.empty()) return false;
+
+    std::error_code filesystemError;
+    std::filesystem::create_directories(path.parent_path(), filesystemError);
+    if (filesystemError) return false;
+
+    std::filesystem::path temporary = path;
+    temporary += L".tmp";
+    {
+        std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+        if (!stream) return false;
+        stream << WideToUtf8(root.wstring()) << "\n";
+        stream.flush();
+        if (!stream) return false;
+    }
+
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    return true;
+}
+
+static bool ClearWebXrRootSelection() {
+    const std::filesystem::path path = WebXrRootSelectionFilePath();
+    if (path.empty()) return false;
+    if (DeleteFileW(path.c_str())) return true;
+    return GetLastError() == ERROR_FILE_NOT_FOUND;
 }
 
 static std::filesystem::path VideoFilesOnlySelectionFilePath() {
@@ -1310,7 +1395,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                    L"R800ZZDlnaServerWindow", nullptr};
     RegisterClassExW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName,
-                              L"r800zzXRdlnaServer 0.5",
+                              L"r800zzXRdlnaServer 0.6",
                               WS_OVERLAPPEDWINDOW, 100, 100, 820, 720,
                               nullptr, nullptr, wc.hInstance, nullptr);
 
@@ -1397,6 +1482,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     DlnaServer server;
     WebXrHttpsServer webxrServer;
+    const std::filesystem::path savedWebXrRoot = LoadWebXrRootSelection();
+    if (!savedWebXrRoot.empty()) {
+        webxrServer.SetRootDirectory(savedWebXrRoot);
+    }
     VideoPlayerProcess videoPlayerProcess;
     ConversionProcess conversionProcess;
     int ai_backend = LoadAiBackendSelection(); // 0=NVIDIA CUDA, 1=DirectML, 2=CPU
@@ -1631,33 +1720,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             (ImGui::GetFrameHeight() - ImGui::GetTextLineHeight()) * 0.5f;
         float titleLinkX = windowPosition.x + ImGui::GetStyle().FramePadding.x;
         const int webLanguage = std::clamp(ui_language, 0, 6);
-        const std::wstring repositoryUrl =
-            std::wstring(L"https://github.com/r800zz/r800zzxrdlnaserver/blob/main/") +
-            kGitHubReadmeFiles[webLanguage];
-        const std::wstring vr180gUrl =
-            std::wstring(L"https://vr180g.com/?l=") +
-            kWebLanguageCodes[webLanguage];
-        const std::wstring vrplayerUrl =
-            std::wstring(L"https://vr180g.com/pico/vrplayer.php?l=") +
-            kWebLanguageCodes[webLanguage];
-        const std::wstring browserUrl =
-            std::wstring(L"https://vr180g.com/browser/browser.php?l=") +
-            kWebLanguageCodes[webLanguage];
-        titleLinkX = DrawTitleBarWebLink(
-            "r800zzXRdlnaServer", repositoryUrl.c_str(),
-            ImVec2(titleLinkX, titleTextY)) + 18.0f;
-        titleLinkX = DrawTitleBarWebLink(
-            "vr180g.com", vr180gUrl.c_str(),
-            ImVec2(titleLinkX, titleTextY)) + 18.0f;
-        titleLinkX = DrawTitleBarWebLink(
-            "R800ZZ", L"https://www.youtube.com/@R800ZZ",
-            ImVec2(titleLinkX, titleTextY)) + 18.0f;
-        titleLinkX = DrawTitleBarWebLink(
-            "vrplayer", vrplayerUrl.c_str(),
-            ImVec2(titleLinkX, titleTextY)) + 18.0f;
-        DrawTitleBarWebLink(
-            "Browser", browserUrl.c_str(),
-            ImVec2(titleLinkX, titleTextY));
+        const std::wstring repositoryUrl = std::wstring(L"https://github.com/r800zz/r800zzxrdlnaserver/blob/main/") + kGitHubReadmeFiles[webLanguage];
+        const std::wstring vr180gUrl = std::wstring(L"https://vr180g.com/?l=") + kWebLanguageCodes[webLanguage]; const std::wstring vrplayerUrl = std::wstring(L"https://vr180g.com/pico/vrplayer.php?l=") + kWebLanguageCodes[webLanguage];
+        const std::wstring browserUrl = std::wstring(L"https://vr180g.com/browser/browser.php?l=") + kWebLanguageCodes[webLanguage];
+        const std::wstring pctohmdUrl = std::wstring(L"https://vr180g.com/pc2hmd.html?l=") + kWebLanguageCodes[webLanguage];
+        titleLinkX = DrawTitleBarWebLink( "r800zzXRdlnaServer", repositoryUrl.c_str(), ImVec2(titleLinkX, titleTextY)) + 18.0f;
+        titleLinkX = DrawTitleBarWebLink( "vr180g.com", vr180gUrl.c_str(), ImVec2(titleLinkX, titleTextY)) + 18.0f;
+        titleLinkX = DrawTitleBarWebLink( "R800ZZ", L"https://www.youtube.com/@R800ZZ", ImVec2(titleLinkX, titleTextY)) + 18.0f;
+        titleLinkX = DrawTitleBarWebLink( "vrplayer", vrplayerUrl.c_str(), ImVec2(titleLinkX, titleTextY)) + 18.0f;
+        titleLinkX = DrawTitleBarWebLink( "Browser", browserUrl.c_str(), ImVec2(titleLinkX, titleTextY)) + 18.0f;
+        titleLinkX = DrawTitleBarWebLink( "PC to VR HMD", pctohmdUrl.c_str(), ImVec2(titleLinkX, titleTextY)) + 18.0f;
 
         ImGui::TextUnformatted("AI Passthrough DLNA Server for r800zzvrplayer");
         const char* languageNames[] = {
@@ -1969,6 +2041,23 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             }
         }
         ImGui::SameLine();
+        if (webxrServer.IsRunning()) ImGui::BeginDisabled();
+        if (ImGui::Button(uiText.webxrChangeFolder)) {
+            const std::filesystem::path selectedWebXrRoot =
+                SelectWebXrRootFolder(hwnd);
+            if (!selectedWebXrRoot.empty() &&
+                webxrServer.SetRootDirectory(selectedWebXrRoot)) {
+                SaveWebXrRootSelection(webxrServer.RootDirectory());
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(uiText.webxrResetFolder)) {
+            if (webxrServer.ResetRootDirectory()) {
+                ClearWebXrRootSelection();
+            }
+        }
+        if (webxrServer.IsRunning()) ImGui::EndDisabled();
+
         if (!webxrServer.IsRunning()) {
             if (selected_address < 0) ImGui::BeginDisabled();
             if (ImGui::Button(uiText.webxrStart, ImVec2(210, 0)) &&

@@ -157,6 +157,33 @@ std::string XmlEscape(std::string_view value) {
     return out;
 }
 
+std::string JsonEscape(std::string_view value) {
+    static constexpr char hex[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(value.size() + 32);
+    for (unsigned char c : value) {
+        switch (c) {
+        case '\"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\b': out += "\\b"; break;
+        case '\f': out += "\\f"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (c < 0x20) {
+                out += "\\u00";
+                out.push_back(hex[(c >> 4) & 0x0f]);
+                out.push_back(hex[c & 0x0f]);
+            } else {
+                out.push_back(static_cast<char>(c));
+            }
+            break;
+        }
+    }
+    return out;
+}
+
 std::string WideToUtf8(const std::wstring& value) {
     if (value.empty()) return {};
     const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
@@ -1819,7 +1846,48 @@ void DlnaServer::HandleHttpClient(SOCKET client) {
         AddLog("===== HTTP REQUEST " + path + " =====\n" + request_headers);
     }
 
-    if ((method == "GET" || method == "HEAD") && routePathLower == "/device.xml") {
+    if ((method == "GET" || method == "HEAD") &&
+        routePathLower == "/-_-9213--api/files") {
+        std::ostringstream json;
+        json << "[\n";
+        for (size_t i = 0; i < media_items_.size(); ++i) {
+            const MediaItem& item = media_items_[i];
+            if (i != 0) json << ",\n";
+            json << "  {\"id\":" << item.id
+                 << ",\"name\":\""
+                 << JsonEscape(WideToUtf8(item.path.filename().wstring())) << "\""
+                 << ",\"url\":\"" << JsonEscape(MediaUrl(item)) << "\""
+                 << ",\"size\":" << item.size
+                 << ",\"parentId\":\"" << JsonEscape(item.parent_id) << "\""
+                 << ",\"isVideo\":" << (item.is_video ? "true" : "false")
+                 << "}";
+        }
+        json << "\n]\n";
+        const std::string body = json.str();
+        std::ostringstream response;
+        response << "HTTP/1.1 200 OK\r\n"
+                 << "SERVER: Windows/10.0 UPnP/1.1 R800ZZ-DLNA/1.0\r\n"
+                 << "Content-Type: application/json; charset=\"utf-8\"\r\n"
+                 << "Access-Control-Allow-Origin: *\r\n"
+                 << "Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n"
+                 << "Access-Control-Allow-Headers: *\r\n"
+                 << "Cache-Control: no-store\r\n"
+                 << "Content-Length: " << body.size() << "\r\n"
+                 << "Connection: close\r\n\r\n";
+        if (method != "HEAD") response << body;
+        SendAll(client, response.str());
+        AddLog(method + " /-_-9213--api/files -> 200 files=" +
+               std::to_string(media_items_.size()));
+    } else if (method == "OPTIONS" &&
+               routePathLower == "/-_-9213--api/files") {
+        SendAll(client,
+                "HTTP/1.1 204 No Content\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
+                "Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n"
+                "Access-Control-Allow-Headers: *\r\n"
+                "Content-Length: 0\r\n"
+                "Connection: close\r\n\r\n");
+    } else if ((method == "GET" || method == "HEAD") && routePathLower == "/device.xml") {
         SendAll(client, HttpResponse(DeviceDescriptionXml(),
                                      "text/xml; charset=\"utf-8\"", method != "HEAD"));
     } else if ((method == "GET" || method == "HEAD") && routePathLower == "/contentdirectory/scpd.xml") {
