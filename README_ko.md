@@ -2,6 +2,7 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 0.7 : HTML/JavaScript 다운로더 연결을 지원합니다.
 ### Ver 0.5 : WebXR HTTPS 서버를 추가했습니다. (PC에 저장된 WebXR 게임을 플레이할 수 있습니다.)
 ### Ver 0.5 : DLNA에서 계층형 폴더 탐색을 지원합니다.
 ### Ver 0.5 : AI 파일 변환에서 GPU 선택을 지원합니다.
