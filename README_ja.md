@@ -2,6 +2,8 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 0.7 : HTML/JavaScript ダウンローダーへの接続に対応しました。
+### Ver 0.7 : WebXR HTTPS サーバーの public_html ディレクトリを変更できるようにしました。
 ### Ver 0.5 : WebXR HTTPSサーバーを追加しました。（PCに保存したWebXRゲームをプレイできます。）
 ### Ver 0.5 : DLNAの階層ディレクトリ閲覧に対応しました。
 ### Ver 0.5 : AIファイル変換のGPU選択に対応しました。
