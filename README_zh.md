@@ -23,6 +23,10 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
   <img src="./jpeg/server_zh.jpeg" alt="r800zzXRdlnaServer for Windows" width="402" height="356" border="2">
 </a>
 
+### 从 VR HMD 的网页浏览器下载存储在电脑上的文件。
+
+<a href="https://vr180g.com/pc2hmd.html?l=cn">Download from r800zzXRdlnaServer</a>
+
 ## WebXR HTTPS 服务器
 
 <a href="./jpeg/webxrserver_zh.jpeg" target="_blank">
