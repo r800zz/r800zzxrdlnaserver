@@ -23,6 +23,10 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
   <img src="./jpeg/server_ko.jpeg" alt="r800zzXRdlnaServer for Windows" width="402" height="356" border="2">
 </a>
 
+### VR HMD의 웹 브라우저에서 PC에 저장된 파일을 다운로드합니다.
+
+<a href="https://vr180g.com/pc2hmd.html?l=kr">Download from r800zzXRdlnaServer</a>
+
 ## WebXR HTTPS 서버
 
 <a href="./jpeg/webxrserver_ko.jpeg" target="_blank">
