@@ -25,7 +25,7 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
 ### Descarga archivos almacenados en tu PC desde el navegador web de tu visor VR.
 
-<a href="https://vr180g.com/pc2hmd.html?l=en">Download from r800zzXRdlnaServer</a>
+<a href="https://vr180g.com/pc2hmd.html?l=es">Download from r800zzXRdlnaServer</a>
 
 ## Servidor HTTPS WebXR
 
