@@ -25,7 +25,7 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
 ### Загружайте файлы, хранящиеся на вашем ПК, из веб-браузера VR-шлема.
 
-<a href="https://vr180g.com/pc2hmd.html?l=en">Download from r800zzXRdlnaServer</a>
+<a href="https://vr180g.com/pc2hmd.html?l=ru">Download from r800zzXRdlnaServer</a>
 
 
 ## Сервер WebXR HTTPS
