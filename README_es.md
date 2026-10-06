@@ -2,6 +2,7 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 0.7 : Se añadió compatibilidad para conectarse al descargador HTML/JavaScript.
 ### Ver 0.5 : Se añadió un servidor HTTPS WebXR. (Puedes jugar a juegos WebXR almacenados en tu PC.)
 ### Ver 0.5 : Se añadió compatibilidad con la navegación jerárquica de carpetas en DLNA.
 ### Ver 0.5 : Se añadió la selección de GPU para la conversión de archivos con IA.
