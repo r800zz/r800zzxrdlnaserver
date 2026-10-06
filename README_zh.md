@@ -2,6 +2,7 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 0.7 : 新增了连接 HTML/JavaScript 下载器的支持。
 ### Ver 0.5 : 添加了 WebXR HTTPS 服务器。（可以运行存储在 PC 上的 WebXR 游戏。）
 ### Ver 0.5 : DLNA 支持分层目录浏览。
 ### Ver 0.5 : AI 文件转换支持选择 GPU。
