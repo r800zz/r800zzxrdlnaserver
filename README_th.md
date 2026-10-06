@@ -25,7 +25,7 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
 ### ดาวน์โหลดไฟล์ที่เก็บไว้ในพีซีของคุณจากเว็บเบราว์เซอร์ของ VR HMD
 
-<a href="https://vr180g.com/pc2hmd.html?l=en">Download from r800zzXRdlnaServer</a>
+<a href="https://vr180g.com/pc2hmd.html?l=th">Download from r800zzXRdlnaServer</a>
 
 ## เซิร์ฟเวอร์ HTTPS WebXR
 
