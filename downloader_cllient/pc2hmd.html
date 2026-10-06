@@ -1,1 +1,548 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Download from r800zzXRdlnaServer</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; background:#111; color:#eee; }
+  main { max-width:980px; margin:0 auto; padding:24px; }
+  h1 { margin:0 0 10px; font-size:1.6rem; }
+  h1 a { color:inherit; }
+  .languages { display:flex; flex-wrap:wrap; gap:8px 14px; margin:0 0 12px; }
+  .intro { margin:0 0 6px; line-height:1.5; }
+  .intro-last { margin:0 0 20px; line-height:1.5; }
+  .languages label { display:inline-flex; align-items:center; gap:5px; white-space:nowrap; cursor:pointer; }
+  .languages input { width:auto; margin:0; padding:0; accent-color:auto; }
+  .server-row { display:grid; grid-template-columns:1fr auto; gap:10px; }
+  input { width:100%; padding:12px; border:1px solid #555; border-radius:8px; background:#1c1c1c; color:#fff; font-size:1rem; }
+  button { padding:11px 16px; border:1px solid #666; border-radius:8px; background:#2a2a2a; color:#fff; cursor:pointer; }
+  button:disabled { opacity:.55; cursor:default; }
+  #status { margin:14px 0; min-height:1.5em; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .toolbar { display:flex; gap:10px; flex-wrap:wrap; margin:12px 0 18px; }
+  .toolbar input { flex:1 1 260px; }
+  .file-list { display:grid; gap:8px; }
+  .file { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:10px; align-items:center; padding:12px; border:1px solid #333; border-radius:8px; background:#181818; }
+  .name { min-width:0; overflow-wrap:anywhere; }
+  .meta { margin-top:4px; color:#aaa; font-size:.82rem; }
+  .empty { color:#aaa; padding:18px 0; }
+  .note { margin-top:24px; color:#aaa; line-height:1.5; font-size:.9rem; }
+  progress { width:100%; height:18px; margin:12px 0; }
+  @media (max-width:700px) {
+    .server-row { grid-template-columns:1fr; }
+    .file { grid-template-columns:1fr 1fr; }
+    .name { grid-column:1 / -1; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Download from <a id="serverReadmeLink" href="https://github.com/r800zz/r800zzxrdlnaserver/blob/main/README.md" target="_blank" rel="noopener">r800zzXRdlnaServer</a></h1>
 
+  <div class="languages" id="languages">
+    <label><input type="radio" name="language" value="en"> English</label>
+    <label><input type="radio" name="language" value="ru"> Русский</label>
+    <label><input type="radio" name="language" value="es"> Español</label>
+    <label><input type="radio" name="language" value="th"> ภาษาไทย</label>
+    <label><input type="radio" name="language" value="cn"> 中文</label>
+    <label><input type="radio" name="language" value="kr"> 한국어</label>
+    <label><input type="radio" name="language" value="jp"> 日本語</label>
+<a href src="https://vr180g.com" target="_blank">vr180g.com</a>
+<a href src="https://vr180g.com" target="_blank">R800ZZbrowser</a>
+<a href src="https://vr180g.com" target="_blank">r800zzvrplayer</a>
+  </div>
+
+  <p class="intro" id="downloadDescription"></p>
+  <p class="intro-last" id="serverOnlyDescription"></p>
+
+  <div class="server-row">
+    <input id="server" placeholder="http://192.168.1.102:49152" autocomplete="off" spellcheck="false">
+    <button id="load">Load File List</button>
+  </div>
+
+  <div id="status"></div>
+
+  <div class="toolbar">
+    <input id="filter" placeholder="Filter files..." autocomplete="off">
+    <button id="reload">Reload</button>
+  </div>
+
+  <progress id="progress" hidden></progress>
+  <div id="files" class="file-list"></div>
+
+  <div class="note">
+    <span id="apiLabel">API endpoint:</span> <code>/-_-9213--api/files</code><br>
+    <span id="serverHelp">Enter only the server base URL, for example</span> <code>http://192.168.1.102:49152</code>.
+  </div>
+</main>
+
+<script>
+var lass = "en";
+var langlang = "en";
+
+(() => {
+  "use strict";
+
+  const API_PATH = "/-_-9213--api/files";
+  const countryCodes = ["en", "ru", "es", "th", "cn", "kr", "jp"];
+  const languageCodes = {
+    en: "en",
+    ru: "ru",
+    es: "es",
+    th: "th",
+    cn: "zh",
+    kr: "ko",
+    jp: "ja"
+  };
+
+  const readmeBaseUrl = "https://github.com/r800zz/r800zzxrdlnaserver/blob/main/";
+
+  const text = {
+    en: {
+      downloadDescription: "Download files stored on your PC from the web browser of your VR HMD.",
+      serverOnlyDescription: "You need to enter the DLNA server URL. This is for r800zzXRdlnaServer0.6- only.",
+      load: "Load File List",
+      reload: "Reload",
+      filter: "Filter files...",
+      apiLabel: "API endpoint:",
+      serverHelp: "Enter only the server base URL, for example",
+      enterServer: "Enter the DLNA server URL.",
+      protocolError: "Only http:// or https:// is supported.",
+      noMatching: "No matching files.",
+      noFiles: "No files.",
+      unnamed: "(unnamed)",
+      parent: "Parent",
+      video: "Video",
+      download: "Download",
+      open: "Open",
+      loading: "Loading file list...",
+      invalidApi: "Invalid API response.",
+      files: "file(s)",
+      loadFailed: "Could not load the file list.",
+      downloading: "Downloading:",
+      saved: "Saved:",
+      downloadFailed: "JavaScript download failed.",
+      openingDirectly: "Opening the file URL directly..."
+    },
+    ru: {
+      downloadDescription: "Загружайте файлы, хранящиеся на вашем ПК, из веб-браузера VR-шлема.",
+      serverOnlyDescription: "Необходимо ввести URL DLNA-сервера. Это предназначено только для r800zzXRdlnaServer0.6-.",
+      load: "Загрузить список файлов",
+      reload: "Обновить",
+      filter: "Фильтр файлов...",
+      apiLabel: "API-адрес:",
+      serverHelp: "Введите только базовый URL сервера, например",
+      enterServer: "Введите URL DLNA-сервера.",
+      protocolError: "Поддерживаются только http:// и https://.",
+      noMatching: "Подходящие файлы не найдены.",
+      noFiles: "Файлов нет.",
+      unnamed: "(без имени)",
+      parent: "Родитель",
+      video: "Видео",
+      download: "Скачать",
+      open: "Открыть",
+      loading: "Загрузка списка файлов...",
+      invalidApi: "Некорректный ответ API.",
+      files: "файл(ов)",
+      loadFailed: "Не удалось загрузить список файлов.",
+      downloading: "Загрузка:",
+      saved: "Сохранено:",
+      downloadFailed: "Не удалось скачать файл с помощью JavaScript.",
+      openingDirectly: "Открывается прямой URL файла..."
+    },
+    es: {
+      downloadDescription: "Descarga archivos almacenados en tu PC desde el navegador web de tu visor VR.",
+      serverOnlyDescription: "Debes introducir la URL del servidor DLNA. Esto es exclusivamente para r800zzXRdlnaServer0.6-.",
+      load: "Cargar lista de archivos",
+      reload: "Recargar",
+      filter: "Filtrar archivos...",
+      apiLabel: "Endpoint de API:",
+      serverHelp: "Introduce solo la URL base del servidor, por ejemplo",
+      enterServer: "Introduce la URL del servidor DLNA.",
+      protocolError: "Solo se admite http:// o https://.",
+      noMatching: "No hay archivos coincidentes.",
+      noFiles: "No hay archivos.",
+      unnamed: "(sin nombre)",
+      parent: "Superior",
+      video: "Vídeo",
+      download: "Descargar",
+      open: "Abrir",
+      loading: "Cargando lista de archivos...",
+      invalidApi: "Respuesta de API no válida.",
+      files: "archivo(s)",
+      loadFailed: "No se pudo cargar la lista de archivos.",
+      downloading: "Descargando:",
+      saved: "Guardado:",
+      downloadFailed: "La descarga con JavaScript ha fallado.",
+      openingDirectly: "Abriendo directamente la URL del archivo..."
+    },
+    th: {
+      downloadDescription: "ดาวน์โหลดไฟล์ที่เก็บไว้ในพีซีของคุณจากเว็บเบราว์เซอร์ของ VR HMD",
+      serverOnlyDescription: "คุณต้องป้อน URL ของเซิร์ฟเวอร์ DLNA เครื่องมือนี้ใช้สำหรับ r800zzXRdlnaServer0.6- เท่านั้น",
+      load: "โหลดรายการไฟล์",
+      reload: "โหลดใหม่",
+      filter: "กรองไฟล์...",
+      apiLabel: "ตำแหน่ง API:",
+      serverHelp: "ป้อนเฉพาะ URL หลักของเซิร์ฟเวอร์ ตัวอย่างเช่น",
+      enterServer: "ป้อน URL ของเซิร์ฟเวอร์ DLNA",
+      protocolError: "รองรับเฉพาะ http:// หรือ https:// เท่านั้น",
+      noMatching: "ไม่พบไฟล์ที่ตรงกัน",
+      noFiles: "ไม่มีไฟล์",
+      unnamed: "(ไม่มีชื่อ)",
+      parent: "โฟลเดอร์แม่",
+      video: "วิดีโอ",
+      download: "ดาวน์โหลด",
+      open: "เปิด",
+      loading: "กำลังโหลดรายการไฟล์...",
+      invalidApi: "การตอบกลับจาก API ไม่ถูกต้อง",
+      files: "ไฟล์",
+      loadFailed: "ไม่สามารถโหลดรายการไฟล์ได้",
+      downloading: "กำลังดาวน์โหลด:",
+      saved: "บันทึกแล้ว:",
+      downloadFailed: "การดาวน์โหลดด้วย JavaScript ล้มเหลว",
+      openingDirectly: "กำลังเปิด URL ของไฟล์โดยตรง..."
+    },
+    cn: {
+      downloadDescription: "从 VR HMD 的网页浏览器下载存储在电脑上的文件。",
+      serverOnlyDescription: "需要输入 DLNA 服务器 URL。本工具仅适用于 r800zzXRdlnaServer0.6-。",
+      load: "加载文件列表",
+      reload: "重新加载",
+      filter: "筛选文件...",
+      apiLabel: "API 地址：",
+      serverHelp: "只需输入服务器的基础 URL，例如",
+      enterServer: "请输入 DLNA 服务器 URL。",
+      protocolError: "仅支持 http:// 或 https://。",
+      noMatching: "没有匹配的文件。",
+      noFiles: "没有文件。",
+      unnamed: "（未命名）",
+      parent: "父目录",
+      video: "视频",
+      download: "下载",
+      open: "打开",
+      loading: "正在加载文件列表...",
+      invalidApi: "API 响应无效。",
+      files: "个文件",
+      loadFailed: "无法加载文件列表。",
+      downloading: "正在下载：",
+      saved: "已保存：",
+      downloadFailed: "JavaScript 下载失败。",
+      openingDirectly: "正在直接打开文件 URL..."
+    },
+    kr: {
+      downloadDescription: "VR HMD의 웹 브라우저에서 PC에 저장된 파일을 다운로드합니다.",
+      serverOnlyDescription: "DLNA 서버 URL을 입력해야 합니다. 이 도구는 r800zzXRdlnaServer0.6- 전용입니다.",
+      load: "파일 목록 불러오기",
+      reload: "다시 불러오기",
+      filter: "파일 필터...",
+      apiLabel: "API 엔드포인트:",
+      serverHelp: "서버 기본 URL만 입력하십시오. 예:",
+      enterServer: "DLNA 서버 URL을 입력하십시오.",
+      protocolError: "http:// 또는 https://만 지원됩니다.",
+      noMatching: "일치하는 파일이 없습니다.",
+      noFiles: "파일이 없습니다.",
+      unnamed: "(이름 없음)",
+      parent: "상위",
+      video: "비디오",
+      download: "다운로드",
+      open: "열기",
+      loading: "파일 목록을 불러오는 중...",
+      invalidApi: "잘못된 API 응답입니다.",
+      files: "개 파일",
+      loadFailed: "파일 목록을 불러오지 못했습니다.",
+      downloading: "다운로드 중:",
+      saved: "저장됨:",
+      downloadFailed: "JavaScript 다운로드에 실패했습니다.",
+      openingDirectly: "파일 URL을 직접 엽니다..."
+    },
+    jp: {
+      downloadDescription: "パソコン上にあるファイルをVR HMDのウェブブラウザからダウンロードします。",
+      serverOnlyDescription: "DLNAサーバーURLを入力する必要があります。r800zzXRdlnaServer0.6- 専用です。",
+      load: "ファイル一覧を読み込む",
+      reload: "再読み込み",
+      filter: "ファイルを絞り込む...",
+      apiLabel: "APIエンドポイント:",
+      serverHelp: "サーバーのベースURLだけを入力してください。例:",
+      enterServer: "DLNAサーバーのURLを入力してください。",
+      protocolError: "http:// または https:// のみ対応しています。",
+      noMatching: "一致するファイルがありません。",
+      noFiles: "ファイルがありません。",
+      unnamed: "（名前なし）",
+      parent: "親",
+      video: "動画",
+      download: "ダウンロード",
+      open: "開く",
+      loading: "ファイル一覧を読み込んでいます...",
+      invalidApi: "APIの応答が不正です。",
+      files: "ファイル",
+      loadFailed: "ファイル一覧を読み込めませんでした。",
+      downloading: "ダウンロード中:",
+      saved: "保存しました:",
+      downloadFailed: "JavaScriptでのダウンロードに失敗しました。",
+      openingDirectly: "ファイルURLを直接開きます..."
+    }
+  };
+
+  const serverInput = document.getElementById("server");
+  const loadButton = document.getElementById("load");
+  const reloadButton = document.getElementById("reload");
+  const filterInput = document.getElementById("filter");
+  const filesElement = document.getElementById("files");
+  const statusElement = document.getElementById("status");
+  const progress = document.getElementById("progress");
+  const apiLabel = document.getElementById("apiLabel");
+  const serverHelp = document.getElementById("serverHelp");
+  const serverReadmeLink = document.getElementById("serverReadmeLink");
+  const downloadDescription = document.getElementById("downloadDescription");
+  const serverOnlyDescription = document.getElementById("serverOnlyDescription");
+  const languageRadios = document.querySelectorAll('input[name="language"]');
+
+  let currentFiles = [];
+
+  function t(key) {
+    return (text[lass] && text[lass][key]) || text.en[key] || key;
+  }
+
+  function initializeLanguage() {
+    const params = new URLSearchParams(window.location.search);
+    const requested = (params.get("l") || "en").toLowerCase();
+    lass = countryCodes.includes(requested) ? requested : "en";
+    langlang = languageCodes[lass];
+    document.documentElement.lang = langlang;
+    for (const radio of languageRadios) radio.checked = radio.value === lass;
+  }
+
+  function setLanguage(code, updateUrl) {
+    lass = countryCodes.includes(code) ? code : "en";
+    langlang = languageCodes[lass];
+    document.documentElement.lang = langlang;
+    for (const radio of languageRadios) radio.checked = radio.value === lass;
+
+    if (updateUrl) {
+      const url = new URL(window.location.href);
+      url.searchParams.set("l", lass);
+      history.replaceState(null, "", url);
+    }
+
+    applyLanguage();
+    renderFiles();
+  }
+
+  function applyLanguage() {
+    loadButton.textContent = t("load");
+    reloadButton.textContent = t("reload");
+    filterInput.placeholder = t("filter");
+    apiLabel.textContent = t("apiLabel");
+    serverHelp.textContent = t("serverHelp");
+    downloadDescription.textContent = t("downloadDescription");
+    serverOnlyDescription.textContent = t("serverOnlyDescription");
+    serverReadmeLink.href = readmeBaseUrl + (lass === "en" ? "README.md" : "README_" + langlang + ".md");
+  }
+
+  const savedServer = localStorage.getItem("r800zz_dlna_server");
+  if (savedServer) serverInput.value = savedServer;
+
+  function setStatus(value) { statusElement.textContent = value; }
+
+  function normalizeServer(value) {
+    value = value.trim();
+    if (!value) throw new Error(t("enterServer"));
+    if (!/^https?:\/\//i.test(value)) value = "http://" + value;
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(t("protocolError"));
+    return url.origin;
+  }
+
+  function humanSize(bytes) {
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n < 0) return "";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let value = n, unit = 0;
+    while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+    return (unit === 0 ? value.toFixed(0) : value.toFixed(1)) + " " + units[unit];
+  }
+
+  function safeName(name) {
+    return String(name || "download").replace(/[\\/:*?"<>|]/g, "_");
+  }
+
+  function resolveFileUrl(server, value) {
+    return new URL(String(value || ""), server + "/").toString();
+  }
+
+  function renderFiles() {
+    let server;
+    try { server = normalizeServer(serverInput.value); }
+    catch (_) { server = ""; }
+
+    const q = filterInput.value.trim().toLowerCase();
+    const list = currentFiles.filter(item => !q || String(item.name || "").toLowerCase().includes(q));
+    filesElement.textContent = "";
+
+    if (!list.length) {
+      const div = document.createElement("div");
+      div.className = "empty";
+      div.textContent = currentFiles.length ? t("noMatching") : t("noFiles");
+      filesElement.appendChild(div);
+      return;
+    }
+
+    for (const item of list) {
+      const row = document.createElement("div");
+      row.className = "file";
+
+      const info = document.createElement("div");
+      info.className = "name";
+
+      const title = document.createElement("div");
+      title.textContent = item.name || t("unnamed");
+      info.appendChild(title);
+
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const parts = [];
+      if (item.size !== undefined) parts.push(humanSize(item.size));
+      if (item.id !== undefined) parts.push("ID " + item.id);
+      if (item.parentId !== undefined) parts.push(t("parent") + " " + item.parentId);
+      if (item.isVideo === true) parts.push(t("video"));
+      meta.textContent = parts.join("  |  ");
+      info.appendChild(meta);
+
+      const downloadButton = document.createElement("button");
+      downloadButton.textContent = t("download");
+      downloadButton.addEventListener("click", () => downloadFile(item, server, downloadButton));
+
+      const openButton = document.createElement("button");
+      openButton.textContent = t("open");
+      openButton.addEventListener("click", () => {
+        try { window.open(resolveFileUrl(server, item.url), "_blank", "noopener"); }
+        catch (e) { setStatus(e.message || String(e)); }
+      });
+
+      row.appendChild(info);
+      row.appendChild(downloadButton);
+      row.appendChild(openButton);
+      filesElement.appendChild(row);
+    }
+  }
+
+  async function loadFiles() {
+    progress.hidden = true;
+    setStatus("");
+    filesElement.textContent = "";
+
+    try {
+      const server = normalizeServer(serverInput.value);
+      serverInput.value = server;
+      localStorage.setItem("r800zz_dlna_server", server);
+
+      loadButton.disabled = true;
+      reloadButton.disabled = true;
+      setStatus(t("loading"));
+
+      const response = await fetch(server + API_PATH, { method:"GET", mode:"cors", cache:"no-store" });
+      if (!response.ok) throw new Error("HTTP " + response.status + " " + response.statusText);
+
+      const data = await response.json();
+      if (!Array.isArray(data)) throw new Error(t("invalidApi"));
+
+      currentFiles = data;
+      renderFiles();
+      setStatus(currentFiles.length + " " + t("files"));
+    } catch (e) {
+      currentFiles = [];
+      renderFiles();
+      setStatus(t("loadFailed") + "\n" + (e && e.message ? e.message : String(e)));
+    } finally {
+      loadButton.disabled = false;
+      reloadButton.disabled = false;
+    }
+  }
+
+  async function downloadFile(item, server, button) {
+    let url;
+    try { url = resolveFileUrl(server, item.url); }
+    catch (e) { setStatus(e.message || String(e)); return; }
+
+    const filename = safeName(item.name || "download");
+    button.disabled = true;
+    progress.hidden = true;
+
+    try {
+      setStatus(t("downloading") + " " + filename);
+      const response = await fetch(url, { method:"GET", mode:"cors", cache:"no-store" });
+      if (!response.ok) throw new Error("HTTP " + response.status + " " + response.statusText);
+
+      const total = Number(response.headers.get("Content-Length")) || 0;
+      const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+
+      if (!reader) {
+        const blob = await response.blob();
+        saveBlob(blob, filename);
+        setStatus(t("saved") + " " + filename);
+        return;
+      }
+
+      const chunks = [];
+      let received = 0;
+      progress.hidden = false;
+      if (total > 0) { progress.max = total; progress.value = 0; }
+      else { progress.removeAttribute("value"); }
+
+      while (true) {
+        const result = await reader.read();
+        if (result.done) break;
+        chunks.push(result.value);
+        received += result.value.byteLength;
+        if (total > 0) {
+          progress.value = received;
+          setStatus(t("downloading") + " " + filename + "  " + Math.floor(received * 100 / total) + "%");
+        } else {
+          setStatus(t("downloading") + " " + filename + "  " + (received / 1024 / 1024).toFixed(1) + " MB");
+        }
+      }
+
+      const contentType = response.headers.get("Content-Type") || "application/octet-stream";
+      saveBlob(new Blob(chunks, { type:contentType }), filename);
+      progress.hidden = true;
+      setStatus(t("saved") + " " + filename);
+    } catch (e) {
+      progress.hidden = true;
+      setStatus(t("downloadFailed") + "\n" + (e && e.message ? e.message : String(e)) + "\n" + t("openingDirectly"));
+      window.open(url, "_blank", "noopener");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function saveBlob(blob, filename) {
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objectUrl;
+    a.download = filename;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
+  }
+
+  initializeLanguage();
+  applyLanguage();
+  renderFiles();
+
+  for (const radio of languageRadios) {
+    radio.addEventListener("change", () => {
+      if (radio.checked) setLanguage(radio.value, true);
+    });
+  }
+
+  loadButton.addEventListener("click", loadFiles);
+  reloadButton.addEventListener("click", loadFiles);
+  filterInput.addEventListener("input", renderFiles);
+  serverInput.addEventListener("keydown", e => { if (e.key === "Enter") loadFiles(); });
+})();
+</script>
+</body>
+</html>
