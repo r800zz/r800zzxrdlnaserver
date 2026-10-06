@@ -2,6 +2,7 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 0.7 : เพิ่มการรองรับการเชื่อมต่อกับตัวดาวน์โหลด HTML/JavaScript
 ### Ver 0.5 : เพิ่มเซิร์ฟเวอร์ HTTPS สำหรับ WebXR (คุณสามารถเล่นเกม WebXR ที่เก็บไว้ในพีซีได้)
 ### Ver 0.5 : รองรับการเรียกดูโฟลเดอร์แบบลำดับชั้นใน DLNA
 ### Ver 0.5 : เพิ่มการเลือก GPU สำหรับการแปลงไฟล์ด้วย AI
