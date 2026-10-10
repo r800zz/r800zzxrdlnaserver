@@ -1,0 +1,1558 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>VR Maze Game</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      body, html {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #0a0c10;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      }
+      #canvas-container {
+        width: 100%;
+        height: 100%;
+        display: block;
+        cursor: crosshair;
+      }
+      #ui-layer {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        padding: 16px;
+        z-index: 10;
+      }
+      .hud-card {
+        pointer-events: auto;
+        background: rgba(15, 23, 42, 0.88);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        border: 1px solid rgba(51, 65, 85, 0.7);
+        border-radius: 8px;
+        padding: 10px 14px;
+        color: #f8fafc;
+        box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+      }
+      .badge {
+        background: rgba(6, 78, 59, 0.8);
+        border: 1px solid rgba(16, 185, 129, 0.7);
+        color: #34d399;
+        font-size: 11px;
+        font-weight: bold;
+        padding: 2px 8px;
+        border-radius: 4px;
+      }
+      .btn {
+        pointer-events: auto;
+        background: rgba(30, 41, 59, 0.9);
+        border: 1px solid rgba(71, 85, 105, 0.6);
+        color: #e2e8f0;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .btn:hover {
+        background: rgba(51, 65, 85, 0.9);
+        color: #ffffff;
+      }
+      .btn.active {
+        background: rgba(14, 116, 144, 0.4);
+        border-color: #38bdf8;
+        color: #38bdf8;
+      }
+      #minimap-card {
+        position: absolute;
+        top: 70px;
+        right: 16px;
+        width: 180px;
+        height: 180px;
+        padding: 6px;
+      }
+      #fade-overlay {
+        position: absolute;
+        inset: 0;
+        background: #000;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.7s ease;
+        z-index: 20;
+      }
+      #reticle {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.5);
+        box-shadow: 0 0 4px rgba(0, 0, 0, 0.8);
+        pointer-events: none;
+      }
+      #victory-modal {
+        position: absolute;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.85);
+        backdrop-filter: blur(10px);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 30;
+        pointer-events: auto;
+      }
+      .modal-box {
+        background: #0f172a;
+        border: 2px solid #10b981;
+        border-radius: 14px;
+        padding: 28px;
+        max-width: 440px;
+        width: 90%;
+        text-align: center;
+        color: white;
+        box-shadow: 0 20px 40px rgba(0,0,0,0.8);
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="canvas-container"></div>
+    <div id="fade-overlay"></div>
+    <div id="reticle"></div>
+
+    <div id="ui-layer">
+      <!-- Top Bar -->
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 10px;">
+          <div class="hud-card" style="display: flex; flex-direction: column; gap: 4px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#10b981;"></span>
+              <strong id="hud-title" style="font-size: 14px;">VR迷路ゲーム</strong>
+              <span class="badge" id="level-badge">STAGE 1 / 8</span>
+            </div>
+            <div style="font-size: 11px; color: #94a3b8;">
+              <span id="hud-goal">GOAL</span> · <span id="hud-time-label">TIME</span>: <span id="time-display">00:00</span>
+            </div>
+          </div>
+
+          <div style="display: flex; gap: 6px;">
+            <button id="btn-flash" class="btn active">🔦</button>
+            <button id="btn-map" class="btn active">🗺️</button>
+            <button id="btn-sound" class="btn active">🔊</button>
+            <div id="vr-btn-holder" style="pointer-events: auto;"></div>
+          </div>
+        </div>
+
+        <!-- 7-Language Radio Selector -->
+        <div id="lang-radio-bar" class="hud-card" style="display: flex; align-items: center; gap: 6px; overflow-x: auto; padding: 4px 8px; font-size: 11px;">
+        </div>
+      </div>
+
+      <!-- Minimap HUD on Desktop -->
+      <div class="hud-card" id="minimap-card">
+        <div style="font-size: 10px; font-family: monospace; color: #38bdf8; display:flex; justify-content:space-between; margin-bottom: 4px;">
+          <span>RADAR</span>
+          <span id="hud-vr-hint" style="color:#94a3b8;">VR: A/X</span>
+        </div>
+        <canvas id="hud-map-canvas" width="168" height="150" style="display: block; width: 100%; height: 140px; border-radius: 4px;"></canvas>
+      </div>
+
+      <!-- Bottom Bar -->
+      <div style="display: flex; justify-content: space-between; align-items: flex-end;">
+        <div class="hud-card" id="hud-bottom-guide" style="font-size: 11px; color: #94a3b8;">
+          WASD: Move | Shift: Run | Click: Look | F: Light
+        </div>
+      </div>
+    </div>
+
+    <!-- Stage Clear / Victory Modal -->
+    <div id="victory-modal">
+      <div class="modal-box">
+        <div id="clear-badge" style="display:inline-block; background:rgba(16,185,129,0.2); border:1px solid #10b981; color:#34d399; font-size:12px; font-weight:bold; padding:3px 12px; border-radius:9999px; margin-bottom:12px;">
+          STAGE 1 / 8
+        </div>
+        <h2 id="victory-title" style="font-size: 24px; color: #10b981; margin-bottom: 8px;">STAGE CLEARED!</h2>
+        <p id="victory-msg" style="font-size: 13px; color: #cbd5e1; margin-bottom: 16px;">
+          Stage complete! Check your elapsed time.
+        </p>
+        <div style="background: #1e293b; padding: 14px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #334155;">
+          <div id="victory-time-label" style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">ELAPSED TIME</div>
+          <div id="final-time" style="font-size: 28px; font-weight: bold; color: #38bdf8; font-family: monospace;">00:00</div>
+        </div>
+        <button id="btn-restart" class="btn" style="width: 100%; padding: 12px; background: #059669; color: white; font-weight: bold; font-size: 14px; border-radius: 8px;">
+          Next Stage
+        </button>
+      </div>
+    </div>
+
+    <script type="module">
+      import * as THREE from 'three';
+      import { VRButton } from 'three/addons/webxr/VRButton.js';
+      import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+
+      // --- URL Parameter and Language Resolution ---
+      // Read ?l=xx country code into variable `lass`, default to 'en'
+      const urlParams = new URLSearchParams(window.location.search);
+      let lass = (urlParams.get('l') || 'en').toLowerCase();
+
+      // Convert country code (lass) into language code (langlang)
+      // Mismatched: cn -> zh, kr -> ko, jp -> jp
+      // Matched: en, ru, es, th
+      let langlang = lass;
+      if (lass === 'cn') {
+        langlang = 'zh';
+      } else if (lass === 'kr') {
+        langlang = 'ko';
+      } else if (lass === 'jp' || lass === 'ja') {
+        langlang = 'jp';
+      } else if (!['en', 'ru', 'es', 'th'].includes(lass)) {
+        langlang = 'en';
+      }
+
+      const languageOptions = [
+        { lass: 'en', label: 'English' },
+        { lass: 'ru', label: 'Русский' },
+        { lass: 'es', label: 'Español' },
+        { lass: 'th', label: 'ภาษาไทย' },
+        { lass: 'cn', label: '中文' },
+        { lass: 'kr', label: '한국어' },
+        { lass: 'jp', label: '日本語' },
+      ];
+
+      // Multilingual Localization Dictionaries (concise to avoid truncation)
+      const translations = {
+        en: {
+          title: 'VR Maze Game',
+          stage: 'STAGE',
+          goal: 'GOAL',
+          time: 'TIME',
+          guide: 'WASD: Move | Shift: Run | Click: Look | F: Light',
+          vrHint: 'VR: A/X',
+          quitConfirm: 'Quit Game?',
+          laserPrompt: 'Laser/Trigger or B/Y: Quit, A/X: Back',
+          quitBtn: 'Quit',
+          resumeBtn: 'Resume',
+          victory: 'MAZE CLEARED!',
+          victoryMsg: 'All stages completed!',
+          stageClear: 'STAGE CLEARED!',
+          stageClearMsg: 'Stage complete! Check your elapsed time.',
+          nextStage: 'Next Stage',
+          restart: 'Play Again',
+          radarHeader: 'RADAR // UP = FORWARD',
+        },
+        ru: {
+          title: 'VR Лабиринт',
+          stage: 'ЭТАП',
+          goal: 'ЦЕЛЬ',
+          time: 'ВРЕМЯ',
+          guide: 'WASD: Ходьба | Shift: Бег | Клик: Обзор | F: Свет',
+          vrHint: 'VR: A/X',
+          quitConfirm: 'Выйти из игры?',
+          laserPrompt: 'Лазер/Курок или B/Y: Выход, A/X: Назад',
+          quitBtn: 'Выход',
+          resumeBtn: 'Назад',
+          victory: 'ЛАБИРИНТ ПРОЙДЕН!',
+          victoryMsg: 'Все этапы пройдены!',
+          stageClear: 'ЭТАП ПРОЙДЕН!',
+          stageClearMsg: 'Этап пройден! Время прохождения:',
+          nextStage: 'Следующий этап',
+          restart: 'Заново',
+          radarHeader: 'РАДАР // ВВЕРХ = ВПЕРЕД',
+        },
+        es: {
+          title: 'Juego Laberinto VR',
+          stage: 'NIVEL',
+          goal: 'META',
+          time: 'TIEMPO',
+          guide: 'WASD: Mover | Shift: Correr | Clic: Mirar | F: Luz',
+          vrHint: 'VR: A/X',
+          quitConfirm: '¿Salir del juego?',
+          laserPrompt: 'Láser/Gatillo o B/Y: Salir, A/X: Volver',
+          quitBtn: 'Salir',
+          resumeBtn: 'Volver',
+          victory: '¡LABERINTO COMPLETADO!',
+          victoryMsg: '¡Completaste todos los niveles!',
+          stageClear: '¡NIVEL COMPLETADO!',
+          stageClearMsg: '¡Nivel completado! Tiempo transcurrido:',
+          nextStage: 'Siguiente Nivel',
+          restart: 'Reiniciar',
+          radarHeader: 'RADAR // ARRIBA = ADELANTE',
+        },
+        th: {
+          title: 'เกมเขาวงกต VR',
+          stage: 'ด่าน',
+          goal: 'เส้นชัย',
+          time: 'เวลา',
+          guide: 'WASD: เดิน | Shift: วิ่ง | คลิก: มอง | F: ไฟฉาย',
+          vrHint: 'VR: A/X',
+          quitConfirm: 'ออกจากเกม?',
+          laserPrompt: 'เลเซอร์/ไก หรือ B/Y: ออก, A/X: กลับ',
+          quitBtn: 'ออก',
+          resumeBtn: 'เล่นต่อ',
+          victory: 'ผ่านเขาวงกตแล้ว!',
+          victoryMsg: 'ผ่านครบทุกด่านแล้ว!',
+          stageClear: 'ผ่านด่านแล้ว!',
+          stageClearMsg: 'ผ่านด่านเรียบร้อย! เวลาที่ใช้:',
+          nextStage: 'ด่านถัดไป',
+          restart: 'เล่นใหม่',
+          radarHeader: 'เรดาร์ // บน = ด้านหน้า',
+        },
+        zh: {
+          title: 'VR迷宫游戏',
+          stage: '关卡',
+          goal: '终点',
+          time: '时间',
+          guide: 'WASD: 移动 | Shift: 奔跑 | 点击: 视角 | F: 手电',
+          vrHint: 'VR: A/X',
+          quitConfirm: '退出游戏？',
+          laserPrompt: '激光/扳机 或 B/Y:退出, A/X:返回',
+          quitBtn: '退出',
+          resumeBtn: '继续',
+          victory: '迷宫通关！',
+          victoryMsg: '恭喜通关所有关卡！',
+          stageClear: '关卡完成！',
+          stageClearMsg: '本关已通关！查看通关时间：',
+          nextStage: '下一关',
+          restart: '再玩一次',
+          radarHeader: '雷达 // 朝上 = 前方',
+        },
+        ko: {
+          title: 'VR 미로 게임',
+          stage: '스테이지',
+          goal: '목표',
+          time: '시간',
+          guide: 'WASD: 이동 | Shift: 달리기 | 클릭: 시점 | F: 라이트',
+          vrHint: 'VR: A/X',
+          quitConfirm: '게임을 종료하시겠습니까?',
+          laserPrompt: '레이저/트리거 또는 B/Y:종료, A/X:취소',
+          quitBtn: '종료',
+          resumeBtn: '계속',
+          victory: '미로 탈출 성공!',
+          victoryMsg: '모든 스테이지를 클리어했습니다!',
+          stageClear: '스테이지 완료!',
+          stageClearMsg: '스테이지를 클리어했습니다! 경과 시간:',
+          nextStage: '다음 스테이지',
+          restart: '다시 하기',
+          radarHeader: '레이더 // 위쪽 = 전방',
+        },
+        jp: {
+          title: 'VR迷路ゲーム',
+          stage: 'ステージ',
+          goal: 'ゴール',
+          time: 'タイム',
+          guide: 'WASD: 移動 | Shift: ダッシュ | クリック: 視点 | F: ライト',
+          vrHint: 'VR: A/X',
+          quitConfirm: 'ゲームを終了しますか？',
+          laserPrompt: 'レーザー/トリガー または B/Y:終了, A/X:戻る',
+          quitBtn: '終了',
+          resumeBtn: '続ける',
+          victory: '迷路クリア！',
+          victoryMsg: '全ステージを制覇しました！',
+          stageClear: 'ステージクリア！',
+          stageClearMsg: 'ゴール到達！経過時間をご確認ください。',
+          nextStage: '次のステージへ',
+          restart: 'もう一度遊ぶ',
+          radarHeader: 'レーダー // 上 = 進行方向',
+        },
+      };
+
+      let t = translations[langlang] || translations.en;
+      let exitSignMesh = null;
+      let currentLevel = 1;
+      let mazeData = null;
+      let updateExitConfirmCanvas = null;
+
+      function applyLanguage(newLass) {
+        lass = newLass;
+        if (lass === 'cn') {
+          langlang = 'zh';
+        } else if (lass === 'kr') {
+          langlang = 'ko';
+        } else if (lass === 'jp' || lass === 'ja') {
+          langlang = 'jp';
+        } else if (['en', 'ru', 'es', 'th'].includes(lass)) {
+          langlang = lass;
+        } else {
+          langlang = 'en';
+        }
+
+        t = translations[langlang] || translations.en;
+
+        document.title = t.title;
+        const hudTitle = document.getElementById('hud-title');
+        if (hudTitle) hudTitle.innerText = t.title;
+        const hudGoal = document.getElementById('hud-goal');
+        if (hudGoal) hudGoal.innerText = t.goal;
+        const hudTime = document.getElementById('hud-time-label');
+        if (hudTime) hudTime.innerText = t.time;
+        const hudVrHint = document.getElementById('hud-vr-hint');
+        if (hudVrHint) hudVrHint.innerText = t.vrHint;
+        const hudGuide = document.getElementById('hud-bottom-guide');
+        if (hudGuide) hudGuide.innerText = t.guide;
+        const vicTitle = document.getElementById('victory-title');
+        if (vicTitle) vicTitle.innerText = t.victory;
+        const vicMsg = document.getElementById('victory-msg');
+        if (vicMsg) vicMsg.innerText = t.victoryMsg;
+        const vicTime = document.getElementById('victory-time-label');
+        if (vicTime) vicTime.innerText = t.time;
+        const btnRestart = document.getElementById('btn-restart');
+        if (btnRestart) btnRestart.innerText = t.restart;
+        const badge = document.getElementById('level-badge');
+        if (badge) badge.innerText = `${t.stage} ${currentLevel} / 8`;
+
+        renderLangRadios();
+        if (typeof updateExitConfirmCanvas === 'function') {
+          updateExitConfirmCanvas();
+        }
+        if (exitSignMesh && typeof createExitSignTex === 'function') {
+          exitSignMesh.material.map = createExitSignTex(currentLevel);
+          exitSignMesh.material.needsUpdate = true;
+        }
+        if (mazeData && typeof playerRig !== 'undefined' && playerRig && typeof updateMinimap === 'function') {
+          updateMinimap(playerRig.position.x, playerRig.position.z, playerRig.rotation.y);
+        }
+      }
+
+      function renderLangRadios() {
+        const bar = document.getElementById('lang-radio-bar');
+        if (!bar) return;
+        bar.innerHTML = '';
+        languageOptions.forEach((opt) => {
+          const isSelected = (opt.lass === lass);
+          const label = document.createElement('label');
+          label.style.cssText = `display: flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 4px; cursor: pointer; white-space: nowrap; ${isSelected ? 'background: rgba(14, 116, 144, 0.4); border: 1px solid #38bdf8; color: #38bdf8; font-weight: bold;' : 'color: #94a3b8; border: 1px solid transparent;'}`;
+
+          const radio = document.createElement('input');
+          radio.type = 'radio';
+          radio.name = 'standalone-lang';
+          radio.value = opt.lass;
+          radio.checked = isSelected;
+          radio.style.accentColor = '#38bdf8';
+          radio.style.cursor = 'pointer';
+          radio.addEventListener('change', () => {
+            const url = new URL(window.location.href);
+            url.searchParams.set('l', opt.lass);
+            window.history.replaceState(null, '', url.toString());
+            applyLanguage(opt.lass);
+          });
+
+          label.appendChild(radio);
+          label.appendChild(document.createTextNode(opt.label));
+          bar.appendChild(label);
+        });
+      }
+
+      // Initial apply and radio render
+      applyLanguage(lass);
+
+      // --- Maze Dimensions and Grid Constants ---
+      const TILE_SIZE = 2.4;
+      const WALL_HEIGHT = 2.6;
+
+      // --- Web Audio Sound Engine ---
+      class SimpleAudio {
+        constructor() {
+          this.ctx = null;
+          this.isMuted = false;
+          this.lastStep = 0;
+        }
+        init() {
+          if (!this.ctx && window.AudioContext) {
+            this.ctx = new AudioContext();
+          }
+          if (this.ctx && this.ctx.state === 'suspended') {
+            this.ctx.resume();
+          }
+        }
+        step() {
+          if (this.isMuted) return;
+          this.init();
+          if (!this.ctx) return;
+          const now = performance.now();
+          if (now - this.lastStep < 340) return;
+          this.lastStep = now;
+
+          const time = this.ctx.currentTime;
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.type = 'triangle';
+          osc.frequency.setValueAtTime(140, time);
+          osc.frequency.exponentialRampToValueAtTime(40, time + 0.05);
+          gain.gain.setValueAtTime(0.06, time);
+          gain.gain.exponentialRampToValueAtTime(0.001, time + 0.05);
+          osc.connect(gain);
+          gain.connect(this.ctx.destination);
+          osc.start(time);
+          osc.stop(time + 0.06);
+        }
+        chime() {
+          if (this.isMuted) return;
+          this.init();
+          if (!this.ctx) return;
+          const freqs = [523.25, 783.99, 1046.5];
+          freqs.forEach((f, i) => {
+            const osc = this.ctx.createOscillator();
+            const gain = this.ctx.createGain();
+            const time = this.ctx.currentTime + i * 0.12;
+            osc.frequency.setValueAtTime(f, time);
+            gain.gain.setValueAtTime(0.1, time);
+            gain.gain.exponentialRampToValueAtTime(0.001, time + 0.8);
+            osc.connect(gain);
+            gain.connect(this.ctx.destination);
+            osc.start(time);
+            osc.stop(time + 0.9);
+          });
+        }
+      }
+      const audio = new SimpleAudio();
+
+      // --- True Labyrinth Generation via Randomized Prim's Algorithm ---
+      // Creates an authentic labyrinth with abundant junctions, dead ends, and branches
+      function generateMaze(rows, cols) {
+        rows = Math.floor(rows / 2) * 2 + 1;
+        cols = Math.floor(cols / 2) * 2 + 1;
+        if (rows < 11) rows = 11;
+        if (cols < 11) cols = 11;
+
+        const grid = Array.from({ length: rows }, () => Array(cols).fill(1));
+        const startR = rows - 2;
+        const startC = 1;
+        grid[startR][startC] = 0;
+
+        const frontier = [];
+        const addFrontiers = (cellR, cellC) => {
+          const dirs = [[-2, 0], [2, 0], [0, -2], [0, 2]];
+          for (const [dr, dc] of dirs) {
+            const nr = cellR + dr;
+            const nc = cellC + dc;
+            if (nr > 0 && nr < rows - 1 && nc > 0 && nc < cols - 1 && grid[nr][nc] === 1) {
+              frontier.push([cellR + dr / 2, cellC + dc / 2, nr, nc]);
+            }
+          }
+        };
+
+        addFrontiers(startR, startC);
+
+        while (frontier.length > 0) {
+          const randIdx = Math.floor(Math.random() * frontier.length);
+          const [wR, wC, tR, tC] = frontier.splice(randIdx, 1)[0];
+          if (grid[tR][tC] === 1) {
+            grid[wR][wC] = 0;
+            grid[tR][tC] = 0;
+            addFrontiers(tR, tC);
+          }
+        }
+
+        // Additional branches and loops
+        const extraBranches = Math.floor((rows * cols) * 0.035);
+        for (let i = 0; i < extraBranches; i++) {
+          const rR = 1 + Math.floor(Math.random() * (rows - 2));
+          const rC = 1 + Math.floor(Math.random() * (cols - 2));
+          if (grid[rR][rC] === 1) {
+            const neighbors = [
+              [rR - 1, rC], [rR + 1, rC], [rR, rC - 1], [rR, rC + 1]
+            ].filter(([nr, nc]) => nr >= 0 && nr < rows && nc >= 0 && nc < cols && grid[nr][nc] === 0);
+            if (neighbors.length === 2) grid[rR][rC] = 0;
+          }
+        }
+
+        // Goal location near opposite corner (top right)
+        let exitC = cols - 2;
+        let exitR = 1;
+        if (grid[exitR][exitC] !== 0) {
+          let found = false;
+          for (let r = 1; r <= 3; r++) {
+            for (let c = cols - 2; c >= 1; c--) {
+              if (grid[r][c] === 0) {
+                exitR = r; exitC = c; found = true; break;
+              }
+            }
+            if (found) break;
+          }
+        }
+
+        grid[exitR][exitC] = 3;
+        grid[startR][startC] = 2;
+
+        return {
+          rows,
+          cols,
+          grid,
+          startX: startC,
+          startZ: startR,
+          exitX: exitC,
+          exitZ: exitR,
+        };
+      }
+
+      // Procedural textures
+      function createWallTex() {
+        const c = document.createElement('canvas');
+        c.width = c.height = 512;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#64748b';
+        ctx.fillRect(0, 0, 512, 512);
+
+        for (let i = 0; i < 4000; i++) {
+          ctx.fillStyle = Math.random() > 0.5 ? '#94a3b8' : '#475569';
+          ctx.fillRect(Math.random() * 512, Math.random() * 512, 2, 2);
+        }
+
+        ctx.strokeStyle = '#334155';
+        ctx.lineWidth = 3;
+        for (let y = 0; y <= 512; y += 128) {
+          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(512, y); ctx.stroke();
+        }
+        for (let row = 0; row < 4; row++) {
+          const y = row * 128;
+          const off = (row % 2) * 128;
+          for (let x = off; x <= 512; x += 256) {
+            ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + 128); ctx.stroke();
+          }
+        }
+        const tex = new THREE.CanvasTexture(c);
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        return tex;
+      }
+
+      function createFloorTex() {
+        const c = document.createElement('canvas');
+        c.width = c.height = 512;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#1e293b';
+        ctx.fillRect(0, 0, 512, 512);
+        const s = 128;
+        for (let x = 0; x < 512; x += s) {
+          for (let y = 0; y < 512; y += s) {
+            ctx.fillStyle = `rgb(${40 + Math.random()*8}, ${44 + Math.random()*8}, ${54 + Math.random()*8})`;
+            ctx.fillRect(x + 2, y + 2, s - 4, s - 4);
+          }
+        }
+        ctx.strokeStyle = '#0f172a';
+        ctx.lineWidth = 4;
+        for (let i = 0; i <= 512; i += s) {
+          ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(512, i); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, 512); ctx.stroke();
+        }
+        const tex = new THREE.CanvasTexture(c);
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        return tex;
+      }
+
+      function createExitSignTex(level) {
+        const c = document.createElement('canvas');
+        c.width = 512; c.height = 256;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#047857';
+        ctx.fillRect(0, 0, 512, 256);
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 10;
+        ctx.strokeRect(16, 16, 480, 224);
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 56px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(t.goal, 256, 85);
+
+        ctx.fillStyle = '#fde047';
+        ctx.font = 'bold 36px monospace';
+        ctx.fillText(`${t.stage} ${level} / 8`, 256, 165);
+        return new THREE.CanvasTexture(c);
+      }
+
+      // Main Three.js Scene Setup
+      const container = document.getElementById('canvas-container');
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x1e293b);
+      scene.fog = null; // No black fog blocking visibility
+
+      const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 150);
+      camera.position.set(0, 1.6, 0);
+
+      const playerRig = new THREE.Group();
+      playerRig.rotation.order = 'YXZ';
+      playerRig.add(camera);
+      scene.add(playerRig);
+
+      // Bright global lighting: 100% visible corridors in all directions
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.95);
+      scene.add(ambientLight);
+
+      const dirLight = new THREE.DirectionalLight(0xffffff, 0.35);
+      dirLight.position.set(20, 40, 20);
+      scene.add(dirLight);
+
+      // Flashlight headlamp attached to camera
+      const flashlight = new THREE.PointLight(0xfff7e6, 1.2, 18);
+      camera.add(flashlight);
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.xr.enabled = true;
+      container.appendChild(renderer.domElement);
+
+      const vrBtn = VRButton.createButton(renderer);
+      vrBtn.style.position = 'relative';
+      vrBtn.style.padding = '6px 12px';
+      vrBtn.style.background = '#059669';
+      vrBtn.style.color = '#fff';
+      vrBtn.style.border = 'none';
+      vrBtn.style.borderRadius = '6px';
+      vrBtn.style.fontSize = '12px';
+      vrBtn.style.fontWeight = 'bold';
+      document.getElementById('vr-btn-holder').appendChild(vrBtn);
+
+      // Controllers
+      const controllerFactory = new XRControllerModelFactory();
+      const createLaser = () => {
+        const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -3.0)]);
+        const mat = new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.65 });
+        return new THREE.Line(geo, mat);
+      };
+
+      const ctrl0 = renderer.xr.getController(0);
+      ctrl0.add(createLaser());
+      playerRig.add(ctrl0);
+      const grip0 = renderer.xr.getControllerGrip(0);
+      grip0.add(controllerFactory.createControllerModel(grip0));
+      playerRig.add(grip0);
+
+      const ctrl1 = renderer.xr.getController(1);
+      ctrl1.add(createLaser());
+      playerRig.add(ctrl1);
+      const grip1 = renderer.xr.getControllerGrip(1);
+      grip1.add(controllerFactory.createControllerModel(grip1));
+      playerRig.add(grip1);
+
+      // Handheld PDA Map
+      const mapCanvas = document.createElement('canvas');
+      mapCanvas.width = mapCanvas.height = 256;
+      const mapCtx = mapCanvas.getContext('2d');
+      const mapTex = new THREE.CanvasTexture(mapCanvas);
+
+      const tabletGroup = new THREE.Group();
+      const tabletBody = new THREE.Mesh(
+        new THREE.BoxGeometry(0.24, 0.015, 0.28),
+        new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.4, metalness: 0.8 })
+      );
+      tabletGroup.add(tabletBody);
+
+      const tabletScreen = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.21, 0.21),
+        new THREE.MeshBasicMaterial({ map: mapTex, depthTest: true })
+      );
+      tabletScreen.rotation.x = -Math.PI / 2;
+      tabletScreen.position.y = 0.009;
+      tabletGroup.add(tabletScreen);
+
+      tabletGroup.position.set(0.22, -0.18, -0.45);
+      tabletGroup.rotation.set(-0.35, -0.2, 0);
+      tabletGroup.visible = false;
+      camera.add(tabletGroup);
+
+      // 3D VR Exit Confirmation Panel
+      const confirmGroup = new THREE.Group();
+      const confCanvas = document.createElement('canvas');
+      confCanvas.width = 512; confCanvas.height = 300;
+      const confCtx = confCanvas.getContext('2d');
+      confCtx.fillStyle = '#0f172a'; confCtx.fillRect(0, 0, 512, 300);
+      confCtx.strokeStyle = '#ef4444'; confCtx.lineWidth = 6; confCtx.strokeRect(6, 6, 500, 288);
+      confCtx.fillStyle = '#ffffff'; confCtx.font = 'bold 26px sans-serif'; confCtx.textAlign = 'center';
+      confCtx.fillText(t.quitConfirm, 256, 70);
+      confCtx.fillStyle = '#94a3b8'; confCtx.font = '16px sans-serif';
+      confCtx.fillText(t.laserPrompt, 256, 110);
+
+      // Red Quit Button
+      confCtx.fillStyle = '#dc2626'; confCtx.fillRect(45, 155, 195, 75);
+      confCtx.fillStyle = '#ffffff'; confCtx.font = 'bold 22px sans-serif';
+      confCtx.fillText(t.quitBtn, 142, 202);
+
+      // Green Resume Button
+      confCtx.fillStyle = '#10b981'; confCtx.fillRect(272, 155, 195, 75);
+      confCtx.fillStyle = '#ffffff';
+      confCtx.fillText(t.resumeBtn, 369, 202);
+
+      confCtx.fillStyle = '#64748b'; confCtx.font = '14px monospace';
+      confCtx.fillText(t.laserPrompt, 256, 268);
+
+      const confTex = new THREE.CanvasTexture(confCanvas);
+      const confMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.85, 0.5), new THREE.MeshBasicMaterial({ map: confTex, transparent: true, opacity: 0.98 }));
+      confirmGroup.add(confMesh);
+
+      // Laser hitbox meshes
+      const btnExitMesh = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.12, 0.02), new THREE.MeshBasicMaterial({ color: 0xdc2626, transparent: true, opacity: 0.01 }));
+      btnExitMesh.position.set(-0.21, -0.06, 0.01);
+      btnExitMesh.userData = { action: 'exit' };
+      confirmGroup.add(btnExitMesh);
+
+      const btnCancelMesh = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.12, 0.02), new THREE.MeshBasicMaterial({ color: 0x10b981, transparent: true, opacity: 0.01 }));
+      btnCancelMesh.position.set(0.21, -0.06, 0.01);
+      btnCancelMesh.userData = { action: 'cancel' };
+      confirmGroup.add(btnCancelMesh);
+
+      updateExitConfirmCanvas = () => {
+        if (!confCtx || !confTex) return;
+        confCtx.fillStyle = '#0f172a'; confCtx.fillRect(0, 0, 512, 300);
+        confCtx.strokeStyle = '#ef4444'; confCtx.lineWidth = 6; confCtx.strokeRect(6, 6, 500, 288);
+        confCtx.fillStyle = '#ffffff'; confCtx.font = 'bold 26px sans-serif'; confCtx.textAlign = 'center';
+        confCtx.fillText(t.quitConfirm, 256, 70);
+        confCtx.fillStyle = '#94a3b8'; confCtx.font = '16px sans-serif';
+        confCtx.fillText(t.laserPrompt, 256, 110);
+
+        confCtx.fillStyle = '#dc2626'; confCtx.fillRect(45, 155, 195, 75);
+        confCtx.fillStyle = '#ffffff'; confCtx.font = 'bold 22px sans-serif';
+        confCtx.fillText(t.quitBtn, 142, 202);
+
+        confCtx.fillStyle = '#10b981'; confCtx.fillRect(272, 155, 195, 75);
+        confCtx.fillStyle = '#ffffff';
+        confCtx.fillText(t.resumeBtn, 369, 202);
+
+        confCtx.fillStyle = '#64748b'; confCtx.font = '14px monospace';
+        confCtx.fillText(t.laserPrompt, 256, 268);
+        confTex.needsUpdate = true;
+      };
+
+      confirmGroup.visible = false;
+      scene.add(confirmGroup);
+
+      // 3D VR Stage Clear / Goal Dialog
+      const goalModalGroup = new THREE.Group();
+      const goalCanvas = document.createElement('canvas');
+      goalCanvas.width = 512; goalCanvas.height = 320;
+      const goalCtx = goalCanvas.getContext('2d');
+      const goalTex = new THREE.CanvasTexture(goalCanvas);
+      const goalPlaneMesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.92, 0.58),
+        new THREE.MeshBasicMaterial({ map: goalTex, transparent: true, opacity: 0.98 })
+      );
+      goalModalGroup.add(goalPlaneMesh);
+
+      const btnGoalNextMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(0.75, 0.16, 0.02),
+        new THREE.MeshBasicMaterial({ color: 0x10b981, transparent: true, opacity: 0.01 })
+      );
+      btnGoalNextMesh.position.set(0, -0.15, 0.01);
+      btnGoalNextMesh.userData = { action: 'next_stage' };
+      goalModalGroup.add(btnGoalNextMesh);
+
+      goalModalGroup.visible = false;
+      scene.add(goalModalGroup);
+
+      function updateGoalModalCanvas(stage, timeStr) {
+        if (!goalCtx || !goalTex) return;
+        goalCtx.fillStyle = '#0f172a';
+        goalCtx.fillRect(0, 0, 512, 320);
+
+        goalCtx.strokeStyle = '#10b981';
+        goalCtx.lineWidth = 6;
+        goalCtx.strokeRect(6, 6, 500, 308);
+
+        const isFinal = (stage >= 8);
+        goalCtx.fillStyle = '#10b981';
+        goalCtx.font = 'bold 28px sans-serif';
+        goalCtx.textAlign = 'center';
+        goalCtx.fillText(isFinal ? t.victory : `${t.stage} ${stage} ${t.stageClear}`, 256, 55);
+
+        goalCtx.fillStyle = '#38bdf8';
+        goalCtx.font = 'bold 15px monospace';
+        goalCtx.fillText(`${t.stage} ${stage} / 8`, 256, 92);
+
+        // Elapsed time box
+        goalCtx.fillStyle = '#1e293b';
+        goalCtx.fillRect(56, 115, 400, 85);
+        goalCtx.strokeStyle = '#334155';
+        goalCtx.lineWidth = 2;
+        goalCtx.strokeRect(56, 115, 400, 85);
+
+        goalCtx.fillStyle = '#94a3b8';
+        goalCtx.font = '13px sans-serif';
+        goalCtx.fillText(t.time, 256, 142);
+
+        goalCtx.fillStyle = '#38bdf8';
+        goalCtx.font = 'bold 36px monospace';
+        goalCtx.fillText(timeStr, 256, 182);
+
+        // Action button
+        goalCtx.fillStyle = '#059669';
+        goalCtx.fillRect(56, 222, 400, 62);
+
+        goalCtx.fillStyle = '#ffffff';
+        goalCtx.font = 'bold 22px sans-serif';
+        const btnLabel = isFinal ? t.restart : t.nextStage;
+        goalCtx.fillText(btnLabel, 256, 260);
+
+        goalTex.needsUpdate = true;
+      }
+
+      function showStageClearWindow(level, timeStr) {
+        if (document.pointerLockElement) {
+          document.exitPointerLock?.();
+        }
+
+        const isFinal = (level >= 8);
+        const clearBadge = document.getElementById('clear-badge');
+        if (clearBadge) clearBadge.innerText = `${t.stage} ${level} / 8`;
+
+        const vicTitle = document.getElementById('victory-title');
+        if (vicTitle) vicTitle.innerText = isFinal ? t.victory : `${t.stage} ${level} ${t.stageClear}`;
+
+        const vicMsg = document.getElementById('victory-msg');
+        if (vicMsg) vicMsg.innerText = isFinal ? t.victoryMsg : t.stageClearMsg;
+
+        const vicTimeLabel = document.getElementById('victory-time-label');
+        if (vicTimeLabel) vicTimeLabel.innerText = t.time;
+
+        const finalTime = document.getElementById('final-time');
+        if (finalTime) finalTime.innerText = timeStr;
+
+        const btnRestart = document.getElementById('btn-restart');
+        if (btnRestart) btnRestart.innerText = isFinal ? t.restart : t.nextStage;
+
+        document.getElementById('victory-modal').style.display = 'flex';
+
+        // 3D VR Dialog position in front of user
+        updateGoalModalCanvas(level, timeStr);
+        const camPos = new THREE.Vector3(); camera.getWorldPosition(camPos);
+        const camDir = new THREE.Vector3(); camera.getWorldDirection(camDir);
+        camDir.y = 0; if (camDir.lengthSq() < 0.001) camDir.set(0, 0, -1);
+        camDir.normalize();
+
+        const targetPos = camPos.clone().add(camDir.multiplyScalar(1.15));
+        targetPos.y = camPos.y;
+        goalModalGroup.position.copy(targetPos);
+        goalModalGroup.lookAt(camPos.x, camPos.y, camPos.z);
+        goalModalGroup.visible = true;
+      }
+
+      function advanceStageOrRestart() {
+        document.getElementById('victory-modal').style.display = 'none';
+        goalModalGroup.visible = false;
+        if (currentLevel >= 8) {
+          currentLevel = 1;
+          startTime = performance.now();
+          buildMaze(1);
+        } else {
+          currentLevel++;
+          startTime = performance.now();
+          buildMaze(currentLevel);
+        }
+        isFading = false;
+      }
+
+      function toggleMapOnHand(targetGrip) {
+        if (!targetGrip) {
+          tabletGroup.visible = !tabletGroup.visible;
+          return;
+        }
+        if (tabletGroup.parent === targetGrip && tabletGroup.visible) {
+          tabletGroup.visible = false;
+        } else {
+          if (tabletGroup.parent) tabletGroup.parent.remove(tabletGroup);
+          targetGrip.add(tabletGroup);
+          tabletGroup.position.set(0, 0.08, -0.06);
+          tabletGroup.rotation.set(-Math.PI / 3.4, 0, 0);
+          tabletGroup.visible = true;
+        }
+      }
+
+      function toggleExitConfirm() {
+        if (confirmGroup.visible) {
+          confirmGroup.visible = false;
+        } else {
+          if (confirmGroup.parent !== scene) {
+            if (confirmGroup.parent) confirmGroup.parent.remove(confirmGroup);
+            scene.add(confirmGroup);
+          }
+          const camPos = new THREE.Vector3(); camera.getWorldPosition(camPos);
+          const camDir = new THREE.Vector3(); camera.getWorldDirection(camDir);
+          camDir.y = 0; if (camDir.lengthSq() < 0.001) camDir.set(0, 0, -1);
+          camDir.normalize();
+
+          const targetPos = camPos.clone().add(camDir.multiplyScalar(1.05));
+          targetPos.y = camPos.y;
+          confirmGroup.position.copy(targetPos);
+          confirmGroup.lookAt(camPos.x, camPos.y, camPos.z);
+          confirmGroup.visible = true;
+        }
+      }
+
+      renderer.xr.addEventListener('sessionstart', () => {
+        tabletGroup.visible = false;
+      });
+      renderer.xr.addEventListener('sessionend', () => {
+        if (tabletGroup.parent) tabletGroup.parent.remove(tabletGroup);
+        tabletGroup.position.set(0.22, -0.18, -0.45);
+        tabletGroup.rotation.set(-0.35, -0.2, 0);
+        camera.add(tabletGroup);
+        tabletGroup.visible = true;
+        confirmGroup.visible = false;
+      });
+
+      // --- Maze Management ---
+      currentLevel = 1;
+      mazeData = null;
+      const mazeGroup = new THREE.Group();
+      scene.add(mazeGroup);
+      let isFading = false;
+      let startTime = performance.now();
+
+      function buildMaze(level) {
+        while (mazeGroup.children.length > 0) {
+          mazeGroup.remove(mazeGroup.children[0]);
+        }
+        // Scaled maze dimensions with rich dead ends
+        const size = Math.min(23, 15 + (level - 1) * 2);
+        mazeData = generateMaze(size, size);
+
+        const wallTex = createWallTex();
+        const floorTex = createFloorTex();
+        floorTex.repeat.set(mazeData.cols, mazeData.rows);
+
+        const wallMat = new THREE.MeshStandardMaterial({ map: wallTex, roughness: 0.85 });
+        const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.7, side: THREE.DoubleSide });
+        const ceilMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, side: THREE.DoubleSide });
+
+        const pW = mazeData.cols * TILE_SIZE;
+        const pD = mazeData.rows * TILE_SIZE;
+
+        const floor = new THREE.Mesh(new THREE.PlaneGeometry(pW, pD), floorMat);
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.set(pW / 2 - TILE_SIZE / 2, 0, pD / 2 - TILE_SIZE / 2);
+        floor.frustumCulled = false;
+        mazeGroup.add(floor);
+
+        const ceil = new THREE.Mesh(new THREE.PlaneGeometry(pW, pD), ceilMat);
+        ceil.rotation.x = Math.PI / 2;
+        ceil.position.set(pW / 2 - TILE_SIZE / 2, WALL_HEIGHT, pD / 2 - TILE_SIZE / 2);
+        ceil.frustumCulled = false;
+        mazeGroup.add(ceil);
+
+        let wallCount = 0;
+        for (let r = 0; r < mazeData.rows; r++) {
+          for (let c = 0; c < mazeData.cols; c++) {
+            if (mazeData.grid[r][c] === 1) wallCount++;
+          }
+        }
+
+        const wallMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(TILE_SIZE, WALL_HEIGHT, TILE_SIZE), wallMat, wallCount);
+        wallMesh.frustumCulled = false;
+        mazeGroup.add(wallMesh);
+        const matrix = new THREE.Matrix4();
+        let idx = 0;
+
+        for (let r = 0; r < mazeData.rows; r++) {
+          for (let c = 0; c < mazeData.cols; c++) {
+            const x = c * TILE_SIZE;
+            const z = r * TILE_SIZE;
+            if (mazeData.grid[r][c] === 1) {
+              matrix.setPosition(x, WALL_HEIGHT / 2, z);
+              wallMesh.setMatrixAt(idx++, matrix);
+            } else if ((r + c) % 3 === 0) {
+              const fixture = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.04, 0.2), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+              fixture.position.set(x, WALL_HEIGHT - 0.02, z);
+              mazeGroup.add(fixture);
+            }
+          }
+        }
+        wallMesh.instanceMatrix.needsUpdate = true;
+
+        // Goal signboard
+        const ex = mazeData.exitX * TILE_SIZE;
+        const ez = mazeData.exitZ * TILE_SIZE;
+        const exitSign = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.5), new THREE.MeshBasicMaterial({ map: createExitSignTex(level) }));
+        exitSign.position.set(ex, WALL_HEIGHT - 0.35, ez + 0.11);
+        mazeGroup.add(exitSign);
+        exitSignMesh = exitSign;
+        const exitLight = new THREE.PointLight(0x10b981, 3.5, 9.0);
+        exitLight.position.set(ex, WALL_HEIGHT - 0.6, ez + 0.4);
+        mazeGroup.add(exitLight);
+
+        // Player initial position
+        playerRig.position.set(mazeData.startX * TILE_SIZE, 0, mazeData.startZ * TILE_SIZE);
+        playerRig.rotation.y = 0;
+        facingDir = 0;
+
+        document.getElementById('level-badge').innerText = `${t.stage} ${level} / 8`;
+      }
+
+      function updateMinimap(pX, pZ, pDir) {
+        if (!mazeData) return;
+        const size = 256;
+        mapCtx.fillStyle = '#0a0f1d';
+        mapCtx.fillRect(0, 0, size, size);
+
+        // Grid lines
+        mapCtx.strokeStyle = '#1e293b';
+        mapCtx.lineWidth = 1;
+        for (let i = 0; i <= size; i += 32) {
+          mapCtx.beginPath(); mapCtx.moveTo(0, i); mapCtx.lineTo(size, i); mapCtx.stroke();
+          mapCtx.beginPath(); mapCtx.moveTo(i, 0); mapCtx.lineTo(i, size); mapCtx.stroke();
+        }
+
+        const padding = 20;
+        const innerSize = size - padding * 2;
+        const maxDim = Math.max(mazeData.cols, mazeData.rows);
+        const cellSize = (innerSize * 0.75) / maxDim;
+
+        const centerX = size / 2;
+        const centerY = size / 2;
+        const dir = pDir !== undefined ? pDir : playerRig.rotation.y;
+
+        const pCol = pX / TILE_SIZE;
+        const pRow = pZ / TILE_SIZE;
+        const px = pCol * cellSize;
+        const py = pRow * cellSize;
+
+        // Heading-up rotation
+        mapCtx.save();
+        mapCtx.translate(centerX, centerY);
+        mapCtx.rotate(dir);
+        mapCtx.translate(-px, -py);
+
+        const halfCell = cellSize / 2;
+        for (let r = 0; r < mazeData.rows; r++) {
+          for (let c = 0; c < mazeData.cols; c++) {
+            const val = mazeData.grid[r][c];
+            if (val === 1) mapCtx.fillStyle = '#475569';
+            else if (val === 2) mapCtx.fillStyle = '#3b82f6';
+            else if (val === 3) mapCtx.fillStyle = '#10b981';
+            else mapCtx.fillStyle = '#1e293b';
+            mapCtx.fillRect(c * cellSize - halfCell, r * cellSize - halfCell, cellSize, cellSize);
+          }
+        }
+
+        // Goal marker
+        const ex = mazeData.exitX * cellSize;
+        const ey = mazeData.exitZ * cellSize;
+        mapCtx.fillStyle = '#10b981';
+        mapCtx.beginPath();
+        mapCtx.arc(ex, ey, halfCell * 0.8, 0, Math.PI * 2);
+        mapCtx.fill();
+        mapCtx.fillStyle = '#ffffff';
+        mapCtx.font = 'bold 8px sans-serif';
+        mapCtx.textAlign = 'center';
+        mapCtx.textBaseline = 'middle';
+        mapCtx.fillText(t.goal, ex, ey);
+
+        mapCtx.restore();
+
+        // Player Arrow Cursor
+        mapCtx.save();
+        mapCtx.translate(centerX, centerY);
+
+        const arrowLen = cellSize * 0.48;
+        const arrowWid = cellSize * 0.34;
+        const halfL = arrowLen / 2;
+        const halfW = arrowWid / 2;
+
+        mapCtx.fillStyle = '#ef4444';
+        mapCtx.strokeStyle = '#ffffff';
+        mapCtx.lineWidth = 1.4;
+
+        mapCtx.beginPath();
+        mapCtx.moveTo(0, -halfL);
+        mapCtx.lineTo(halfW, halfL);
+        mapCtx.lineTo(0, halfL * 0.35);
+        mapCtx.lineTo(-halfW, halfL);
+        mapCtx.closePath();
+        mapCtx.fill();
+        mapCtx.stroke();
+
+        mapCtx.restore();
+
+        // North compass
+        mapCtx.save();
+        mapCtx.translate(size - 20, 20);
+        mapCtx.rotate(dir);
+        mapCtx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+        mapCtx.beginPath(); mapCtx.arc(0, 0, 13, 0, Math.PI * 2); mapCtx.fill();
+        mapCtx.strokeStyle = '#38bdf8'; mapCtx.lineWidth = 1.2; mapCtx.stroke();
+        mapCtx.fillStyle = '#ef4444';
+        mapCtx.beginPath(); mapCtx.moveTo(0, -10); mapCtx.lineTo(3.5, 2); mapCtx.lineTo(-3.5, 2); mapCtx.closePath(); mapCtx.fill();
+        mapCtx.fillStyle = '#ffffff'; mapCtx.font = 'bold 8px monospace'; mapCtx.textAlign = 'center'; mapCtx.textBaseline = 'middle';
+        mapCtx.fillText('N', 0, 6.5);
+        mapCtx.restore();
+
+        // Upright readable Elapsed Time display (unaffected by map heading rotation)
+        const currentElapsedSec = Math.floor((performance.now() - startTime) / 1000);
+        const curMins = String(Math.floor(currentElapsedSec / 60)).padStart(2, '0');
+        const curSecs = String(currentElapsedSec % 60).padStart(2, '0');
+        const timeFormatted = `${curMins}:${curSecs}`;
+
+        mapCtx.save();
+        mapCtx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+        mapCtx.strokeStyle = '#38bdf8';
+        mapCtx.lineWidth = 1.5;
+        mapCtx.beginPath();
+        if (mapCtx.roundRect) {
+          mapCtx.roundRect(14, size - 30, size - 28, 22, 5);
+        } else {
+          mapCtx.rect(14, size - 30, size - 28, 22);
+        }
+        mapCtx.fill();
+        mapCtx.stroke();
+
+        mapCtx.fillStyle = '#38bdf8';
+        mapCtx.font = 'bold 10px sans-serif';
+        mapCtx.textAlign = 'left';
+        mapCtx.textBaseline = 'middle';
+        mapCtx.fillText('⏱️ ' + t.time, 22, size - 19);
+
+        mapCtx.fillStyle = '#ffffff';
+        mapCtx.font = 'bold 13px monospace';
+        mapCtx.textAlign = 'right';
+        mapCtx.fillText(timeFormatted, size - 22, size - 19);
+        mapCtx.restore();
+
+        mapTex.needsUpdate = true;
+
+        // Sync to 2D screen hud canvas
+        const hudCanvas = document.getElementById('hud-map-canvas');
+        if (hudCanvas) {
+          const hCtx = hudCanvas.getContext('2d');
+          hCtx.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
+          hCtx.drawImage(mapCanvas, 0, 0, hudCanvas.width, hudCanvas.height);
+        }
+      }
+
+      // Input listeners
+      const keys = {};
+      window.addEventListener('keydown', (e) => {
+        keys[e.code] = true;
+        if (e.code === 'KeyF') {
+          flashlight.visible = !flashlight.visible;
+          document.getElementById('btn-flash').classList.toggle('active', flashlight.visible);
+        }
+        if (e.code === 'KeyM') {
+          tabletGroup.visible = !tabletGroup.visible;
+          document.getElementById('btn-map').classList.toggle('active', tabletGroup.visible);
+          document.getElementById('minimap-card').style.display = tabletGroup.visible ? 'block' : 'none';
+        }
+      });
+      window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+      let isLocked = false;
+      let mouseYaw = 0;
+      let mousePitch = 0;
+
+      container.addEventListener('click', () => {
+        if (!renderer.xr.isPresenting) {
+          container.requestPointerLock?.();
+          audio.init();
+        }
+      });
+      document.addEventListener('pointerlockchange', () => {
+        isLocked = document.pointerLockElement === container;
+      });
+      window.addEventListener('mousemove', (e) => {
+        if (!isLocked || renderer.xr.isPresenting) return;
+        mouseYaw -= e.movementX * 0.0024;
+        mousePitch -= e.movementY * 0.0024;
+        mousePitch = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, mousePitch));
+        camera.rotation.x = mousePitch;
+        playerRig.rotation.y = mouseYaw;
+      });
+
+      // UI button events
+      document.getElementById('btn-flash').addEventListener('click', () => {
+        flashlight.visible = !flashlight.visible;
+        document.getElementById('btn-flash').classList.toggle('active', flashlight.visible);
+      });
+      document.getElementById('btn-map').addEventListener('click', () => {
+        tabletGroup.visible = !tabletGroup.visible;
+        document.getElementById('btn-map').classList.toggle('active', tabletGroup.visible);
+        document.getElementById('minimap-card').style.display = tabletGroup.visible ? 'block' : 'none';
+      });
+      document.getElementById('btn-sound').addEventListener('click', () => {
+        audio.isMuted = !audio.isMuted;
+        document.getElementById('btn-sound').classList.toggle('active', !audio.isMuted);
+      });
+      document.getElementById('btn-restart').addEventListener('click', () => {
+        advanceStageOrRestart();
+      });
+
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      // Render Loop
+      const clock = new THREE.Clock();
+      let lastMapUpdate = 0;
+      let facingDir = 0; // 0: North, 1: East, 2: South, 3: West
+      let stickTurnNeutral = true;
+      let keyTurnNeutral = true;
+      const lastButtons = {};
+
+      buildMaze(currentLevel);
+
+      renderer.setAnimationLoop(() => {
+        const dt = Math.min(clock.getDelta(), 0.1);
+
+        // Timer
+        const elapsedSec = Math.floor((performance.now() - startTime) / 1000);
+        const mins = String(Math.floor(elapsedSec / 60)).padStart(2, '0');
+        const secs = String(elapsedSec % 60).padStart(2, '0');
+        document.getElementById('time-display').innerText = `${mins}:${secs}`;
+
+        let turnCmd = 0;
+        let moveInput = 0;
+        if (keys['KeyW'] || keys['ArrowUp']) moveInput += 1;
+        if (keys['KeyS'] || keys['ArrowDown']) moveInput -= 1;
+
+        // VR Controllers
+        let vrStickX = 0;
+        if (renderer.xr.isPresenting) {
+          const session = renderer.xr.getSession();
+          if (session && session.inputSources) {
+            session.inputSources.forEach((s, idx) => {
+              if (!s.gamepad) return;
+              const ax = s.gamepad.axes;
+              const btns = s.gamepad.buttons;
+
+              let stickX = 0;
+              let stickY = 0;
+              const mag01 = Math.hypot(ax[0] || 0, ax[1] || 0);
+              const mag23 = ax.length >= 4 ? Math.hypot(ax[2] || 0, ax[3] || 0) : 0;
+
+              if (mag01 >= mag23 && mag01 > 0.38) {
+                stickX = ax[0] || 0;
+                stickY = ax[1] || 0;
+              } else if (mag23 > mag01 && mag23 > 0.38) {
+                stickX = ax[2] || 0;
+                stickY = ax[3] || 0;
+              }
+
+              if (Math.abs(stickX) > Math.abs(vrStickX)) {
+                vrStickX = stickX;
+              }
+
+              if (stickY < -0.38) moveInput += 1;
+              else if (stickY > 0.38) moveInput -= 1;
+
+              if (!lastButtons[idx]) lastButtons[idx] = [];
+              const isJustPressed = (b) => {
+                if (!btns || b >= btns.length) return false;
+                const cur = btns[b]?.pressed || false;
+                const prev = lastButtons[idx][b] || false;
+                lastButtons[idx][b] = cur;
+                return cur && !prev;
+              };
+
+              // Use current controller/grip directly for single-controller support
+              const currentCtrl = renderer.xr.getController(idx);
+              const currentGrip = renderer.xr.getControllerGrip(idx);
+
+              let hitAction = null;
+              if (confirmGroup.visible) {
+                const raycaster = new THREE.Raycaster();
+                const tempMat = new THREE.Matrix4();
+                tempMat.identity().extractRotation(currentCtrl.matrixWorld);
+                raycaster.ray.origin.setFromMatrixPosition(currentCtrl.matrixWorld);
+                raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMat);
+                const hits = raycaster.intersectObjects(confirmGroup.children, true);
+                for (const h of hits) {
+                  if (h.object.userData?.action) {
+                    hitAction = h.object.userData.action;
+                    break;
+                  }
+                }
+              }
+
+              // Stage Clear Window interaction in VR
+              if (goalModalGroup.visible) {
+                if (isJustPressed(0) || isJustPressed(4) || isJustPressed(3) || isJustPressed(5)) {
+                  advanceStageOrRestart();
+                  return;
+                }
+              }
+
+              // Trigger (Click / Select)
+              if (isJustPressed(0)) {
+                if (confirmGroup.visible) {
+                  if (hitAction === 'exit') session.end();
+                  else if (hitAction === 'cancel') confirmGroup.visible = false;
+                }
+              }
+
+              // Button A / X: Toggle map on active controller grip
+              if (isJustPressed(4) || isJustPressed(3)) {
+                if (confirmGroup.visible) {
+                  confirmGroup.visible = false;
+                } else {
+                  toggleMapOnHand(currentGrip);
+                }
+              }
+
+              // Button B / Y: Toggle exit confirmation dialog
+              if (isJustPressed(5)) {
+                if (confirmGroup.visible) {
+                  session.end();
+                } else {
+                  toggleExitConfirm();
+                }
+              }
+            });
+          }
+        }
+
+        // Stick Turn: requires neutral return before turning again
+        if (Math.abs(vrStickX) < 0.25) {
+          stickTurnNeutral = true;
+        } else if (stickTurnNeutral) {
+          if (vrStickX > 0.5) {
+            turnCmd = 1;
+            stickTurnNeutral = false;
+          } else if (vrStickX < -0.5) {
+            turnCmd = -1;
+            stickTurnNeutral = false;
+          }
+        }
+
+        // Keyboard A/D or Arrow keys: one turn per keystroke
+        const isKeyLeft = keys['KeyA'] || keys['ArrowLeft'];
+        const isKeyRight = keys['KeyD'] || keys['ArrowRight'];
+        if (!isKeyLeft && !isKeyRight) {
+          keyTurnNeutral = true;
+        } else if (keyTurnNeutral) {
+          if (isKeyRight) {
+            turnCmd = 1;
+            keyTurnNeutral = false;
+          } else if (isKeyLeft) {
+            turnCmd = -1;
+            keyTurnNeutral = false;
+          }
+        }
+
+        // Execute 90° turn and snap to cell center
+        if (turnCmd !== 0) {
+          if (turnCmd === 1) facingDir = (facingDir + 1) % 4;
+          else facingDir = (facingDir + 3) % 4;
+          audio.step();
+
+          const curCol = Math.round(playerRig.position.x / TILE_SIZE);
+          const curRow = Math.round(playerRig.position.z / TILE_SIZE);
+          playerRig.position.x = curCol * TILE_SIZE;
+          playerRig.position.z = curRow * TILE_SIZE;
+
+          mouseYaw = -facingDir * (Math.PI / 2);
+          playerRig.rotation.y = mouseYaw;
+        } else if (renderer.xr.isPresenting) {
+          playerRig.rotation.y = -facingDir * (Math.PI / 2);
+        } else if (isLocked) {
+          // In desktop mode, sync facingDir to nearest cardinal direction of the player's view
+          const normYaw = ((-mouseYaw % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+          facingDir = Math.round(normYaw / (Math.PI / 2)) % 4;
+        }
+
+        // Pure Grid Discrete-Rail Locomotion
+        if (moveInput !== 0) {
+          const spd = (keys['ShiftLeft'] ? 3.2 : 2.2) * dt;
+          const moveDist = (moveInput > 0 ? 1 : -1) * spd;
+
+          const curCol = Math.round(playerRig.position.x / TILE_SIZE);
+          const curRow = Math.round(playerRig.position.z / TILE_SIZE);
+          const curCenterX = curCol * TILE_SIZE;
+          const curCenterZ = curRow * TILE_SIZE;
+
+          const isWall = (c, r) => {
+            if (r < 0 || r >= mazeData.rows || c < 0 || c >= mazeData.cols) return true;
+            return mazeData.grid[r][c] === 1;
+          };
+
+          if (facingDir === 0 || facingDir === 2) {
+            // North-South rail
+            playerRig.position.x = curCenterX;
+
+            const dirSign = facingDir === 0 ? -1 : 1;
+            const deltaZ = dirSign * moveDist;
+            let targetZ = playerRig.position.z + deltaZ;
+
+            if (deltaZ < 0) {
+              if (isWall(curCol, curRow - 1) && targetZ < curCenterZ) {
+                targetZ = curCenterZ;
+              }
+            } else if (deltaZ > 0) {
+              if (isWall(curCol, curRow + 1) && targetZ > curCenterZ) {
+                targetZ = curCenterZ;
+              }
+            }
+
+            if (playerRig.position.z !== targetZ) {
+              playerRig.position.z = targetZ;
+              audio.step();
+            }
+          } else {
+            // East-West rail
+            playerRig.position.z = curCenterZ;
+
+            const dirSign = facingDir === 1 ? 1 : -1;
+            const deltaX = dirSign * moveDist;
+            let targetX = playerRig.position.x + deltaX;
+
+            if (deltaX > 0) {
+              if (isWall(curCol + 1, curRow) && targetX > curCenterX) {
+                targetX = curCenterX;
+              }
+            } else if (deltaX < 0) {
+              if (isWall(curCol - 1, curRow) && targetX < curCenterX) {
+                targetX = curCenterX;
+              }
+            }
+
+            if (playerRig.position.x !== targetX) {
+              playerRig.position.x = targetX;
+              audio.step();
+            }
+          }
+        }
+
+        // Goal reached check: always display the elapsed time window on goal
+        if (!isFading && mazeData) {
+          const cCol = Math.round(playerRig.position.x / TILE_SIZE);
+          const cRow = Math.round(playerRig.position.z / TILE_SIZE);
+          if (cCol === mazeData.exitX && cRow === mazeData.exitZ) {
+            isFading = true;
+            audio.chime();
+            showStageClearWindow(currentLevel, `${mins}:${secs}`);
+          }
+        }
+
+        // Minimap refresh throttle
+        const now = performance.now();
+        if (now - lastMapUpdate > 100) {
+          updateMinimap(playerRig.position.x, playerRig.position.z, playerRig.rotation.y);
+          lastMapUpdate = now;
+        }
+
+        renderer.render(scene, camera);
+      });
+    </script>
+  </body>
+</html>
+
