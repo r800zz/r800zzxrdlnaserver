@@ -54,7 +54,10 @@
 <a href src="https://vr180g.com" target="_blank">r800zzvrplayer</a>
   </div>
 
+  <p class="intro" id="playerDownloadDescription"></p>
   <p class="intro" id="downloadDescription"></p>
+  <p class="intro" id="browserDescription"></p>
+  <p class="intro" id="windowsBrowserDescription"></p>
   <p class="intro-last" id="serverOnlyDescription"></p>
 
   <div class="server-row">
@@ -101,8 +104,11 @@ var langlang = "en";
 
   const text = {
     en: {
+      playerDownloadDescription: "r800zzvrplayer 1.0 or later includes a download feature, so it is easier to use on PICO/Meta.",
       downloadDescription: "Download files stored on your PC from the web browser of your VR HMD.",
-      serverOnlyDescription: "You need to enter the DLNA server URL. This is for r800zzXRdlnaServer0.7- only.",
+      browserDescription: "Supported browsers are R800ZZbrowser Gecko / Wolvic Gecko, and a setting is required.<br>Open <code>about:config</code>, search for <code>security.mixed_content.block_active_content</code>, and set it to <code>false</code>. This is required when an HTTPS page accesses r800zzXRdlnaServer on the local network over HTTP. This setting weakens mixed-content protection, so restore it to <code>true</code> when you no longer need this feature.",
+      windowsBrowserDescription: "Windows Edge / Chrome are also supported.",
+      serverOnlyDescription: "You need to enter the DLNA server URL. This is for r800zzXRdlnaServer0.8- only.",
       load: "Load File List",
       reload: "Reload",
       filter: "Filter files...",
@@ -127,8 +133,11 @@ var langlang = "en";
       openingDirectly: "Opening the file URL directly..."
     },
     ru: {
+      playerDownloadDescription: "В r800zzvrplayer 1.0 и новее есть функция загрузки, поэтому на PICO/Meta проще использовать её.",
       downloadDescription: "Загружайте файлы, хранящиеся на вашем ПК, из веб-браузера VR-шлема.",
-      serverOnlyDescription: "Необходимо ввести URL DLNA-сервера. Это предназначено только для r800zzXRdlnaServer0.7-.",
+      browserDescription: "Поддерживаемые браузеры: R800ZZbrowser Gecko / Wolvic Gecko. Требуется настройка.<br>Откройте <code>about:config</code>, найдите <code>security.mixed_content.block_active_content</code> и установите значение <code>false</code>. Это необходимо, когда HTTPS-страница обращается к r800zzXRdlnaServer в локальной сети по HTTP. Эта настройка ослабляет защиту от смешанного содержимого, поэтому после использования рекомендуется вернуть значение <code>true</code>.",
+      windowsBrowserDescription: "Также поддерживаются Edge / Chrome в Windows.",
+      serverOnlyDescription: "Необходимо ввести URL DLNA-сервера. Это предназначено только для r800zzXRdlnaServer0.8-.",
       load: "Загрузить список файлов",
       reload: "Обновить",
       filter: "Фильтр файлов...",
@@ -153,8 +162,11 @@ var langlang = "en";
       openingDirectly: "Открывается прямой URL файла..."
     },
     es: {
+      playerDownloadDescription: "r800zzvrplayer 1.0 o posterior incluye una función de descarga, por lo que es más fácil usarla en PICO/Meta.",
       downloadDescription: "Descarga archivos almacenados en tu PC desde el navegador web de tu visor VR.",
-      serverOnlyDescription: "Debes introducir la URL del servidor DLNA. Esto es exclusivamente para r800zzXRdlnaServer0.7-.",
+      browserDescription: "Los navegadores compatibles son R800ZZbrowser Gecko / Wolvic Gecko y requieren una configuración.<br>Abre <code>about:config</code>, busca <code>security.mixed_content.block_active_content</code> y cámbialo a <code>false</code>. Esto es necesario cuando una página HTTPS accede a r800zzXRdlnaServer en la red local mediante HTTP. Esta configuración reduce la protección contra contenido mixto, así que vuelve a ponerla en <code>true</code> cuando ya no necesites esta función.",
+      windowsBrowserDescription: "También se admiten Edge / Chrome en Windows.",
+      serverOnlyDescription: "Debes introducir la URL del servidor DLNA. Esto es exclusivamente para r800zzXRdlnaServer0.8-.",
       load: "Cargar lista de archivos",
       reload: "Recargar",
       filter: "Filtrar archivos...",
@@ -179,8 +191,11 @@ var langlang = "en";
       openingDirectly: "Abriendo directamente la URL del archivo..."
     },
     th: {
+      playerDownloadDescription: "r800zzvrplayer 1.0 ขึ้นไปมีฟังก์ชันดาวน์โหลด ดังนั้นบน PICO/Meta การใช้ฟังก์ชันนั้นจะง่ายกว่า",
       downloadDescription: "ดาวน์โหลดไฟล์ที่เก็บไว้ในพีซีของคุณจากเว็บเบราว์เซอร์ของ VR HMD",
-      serverOnlyDescription: "คุณต้องป้อน URL ของเซิร์ฟเวอร์ DLNA เครื่องมือนี้ใช้สำหรับ r800zzXRdlnaServer0.7- เท่านั้น",
+      browserDescription: "เบราว์เซอร์ที่รองรับคือ R800ZZbrowser Gecko / Wolvic Gecko และต้องมีการตั้งค่าเพิ่มเติม<br>เปิด <code>about:config</code> ค้นหา <code>security.mixed_content.block_active_content</code> แล้วตั้งค่าเป็น <code>false</code> จำเป็นต้องตั้งค่านี้เมื่อหน้า HTTPS เข้าถึง r800zzXRdlnaServer ในเครือข่ายภายในผ่าน HTTP การตั้งค่านี้จะลดการป้องกัน mixed content ดังนั้นเมื่อไม่ใช้ฟังก์ชันนี้แล้วควรตั้งกลับเป็น <code>true</code>",
+      windowsBrowserDescription: "รองรับ Edge / Chrome บน Windows ด้วย",
+      serverOnlyDescription: "คุณต้องป้อน URL ของเซิร์ฟเวอร์ DLNA เครื่องมือนี้ใช้สำหรับ r800zzXRdlnaServer0.8- เท่านั้น",
       load: "โหลดรายการไฟล์",
       reload: "โหลดใหม่",
       filter: "กรองไฟล์...",
@@ -205,8 +220,11 @@ var langlang = "en";
       openingDirectly: "กำลังเปิด URL ของไฟล์โดยตรง..."
     },
     cn: {
+      playerDownloadDescription: "r800zzvrplayer 1.0 及以上版本带有下载功能，因此在 PICO/Meta 上使用它会更简单。",
       downloadDescription: "从 VR HMD 的网页浏览器下载存储在电脑上的文件。",
-      serverOnlyDescription: "需要输入 DLNA 服务器 URL。本工具仅适用于 r800zzXRdlnaServer0.7-。",
+      browserDescription: "支持的浏览器为 R800ZZbrowser Gecko / Wolvic Gecko，并且需要进行设置。<br>打开 <code>about:config</code>，搜索 <code>security.mixed_content.block_active_content</code>，并将其设置为 <code>false</code>。当 HTTPS 页面通过 HTTP 访问局域网中的 r800zzXRdlnaServer 时需要此设置。此设置会降低混合内容保护，因此不再使用此功能时建议恢复为 <code>true</code>。",
+      windowsBrowserDescription: "Windows 上的 Edge / Chrome 也受支持。",
+      serverOnlyDescription: "需要输入 DLNA 服务器 URL。本工具仅适用于 r800zzXRdlnaServer0.8-。",
       load: "加载文件列表",
       reload: "重新加载",
       filter: "筛选文件...",
@@ -231,8 +249,11 @@ var langlang = "en";
       openingDirectly: "正在直接打开文件 URL..."
     },
     kr: {
+      playerDownloadDescription: "r800zzvrplayer 1.0 이상에는 다운로드 기능이 있으므로 PICO/Meta에서는 그 기능을 사용하는 편이 더 간단합니다.",
       downloadDescription: "VR HMD의 웹 브라우저에서 PC에 저장된 파일을 다운로드합니다.",
-      serverOnlyDescription: "DLNA 서버 URL을 입력해야 합니다. 이 도구는 r800zzXRdlnaServer0.7- 전용입니다.",
+      browserDescription: "지원 브라우저는 R800ZZbrowser Gecko / Wolvic Gecko이며 설정이 필요합니다.<br><code>about:config</code>를 열고 <code>security.mixed_content.block_active_content</code>를 검색한 뒤 <code>false</code>로 설정하십시오. HTTPS 페이지에서 로컬 네트워크의 r800zzXRdlnaServer에 HTTP로 접근할 때 필요한 설정입니다. 이 설정은 혼합 콘텐츠 보호를 약화시키므로 이 기능을 사용하지 않을 때는 <code>true</code>로 되돌리는 것을 권장합니다.",
+      windowsBrowserDescription: "Windows의 Edge / Chrome도 지원합니다.",
+      serverOnlyDescription: "DLNA 서버 URL을 입력해야 합니다. 이 도구는 r800zzXRdlnaServer0.8- 전용입니다.",
       load: "파일 목록 불러오기",
       reload: "다시 불러오기",
       filter: "파일 필터...",
@@ -257,8 +278,11 @@ var langlang = "en";
       openingDirectly: "파일 URL을 직접 엽니다..."
     },
     jp: {
+      playerDownloadDescription: "r800zzvrplayer 1.0以上にはダウンロード機能があるので、PICO/Metaではそちらを使うほうが簡単です。",
       downloadDescription: "パソコン上にあるファイルをVR HMDのウェブブラウザからダウンロードします。",
-      serverOnlyDescription: "DLNAサーバーURLを入力する必要があります。r800zzXRdlnaServer0.7- 専用です。",
+      browserDescription: "対応ブラウザはR800ZZbrowser Gecko / Wolvic Geckoで、設定が必要です。<br><code>about:config</code>を開き、<code>security.mixed_content.block_active_content</code>を検索して<code>false</code>に設定してください。HTTPSのページからLAN内のr800zzXRdlnaServerへHTTPでアクセスする場合に必要な設定です。この設定はMixed Contentの保護を弱めるため、この機能を使わないときは<code>true</code>に戻すことを推奨します。",
+      windowsBrowserDescription: "WindowsのEdge / Chromeにも対応します。",
+      serverOnlyDescription: "DLNAサーバーURLを入力する必要があります。r800zzXRdlnaServer0.8- 専用です。",
       load: "ファイル一覧を読み込む",
       reload: "再読み込み",
       filter: "ファイルを絞り込む...",
@@ -294,7 +318,10 @@ var langlang = "en";
   const apiLabel = document.getElementById("apiLabel");
   const serverHelp = document.getElementById("serverHelp");
   const serverReadmeLink = document.getElementById("serverReadmeLink");
+  const playerDownloadDescription = document.getElementById("playerDownloadDescription");
   const downloadDescription = document.getElementById("downloadDescription");
+  const browserDescription = document.getElementById("browserDescription");
+  const windowsBrowserDescription = document.getElementById("windowsBrowserDescription");
   const serverOnlyDescription = document.getElementById("serverOnlyDescription");
   const languageRadios = document.querySelectorAll('input[name="language"]');
 
@@ -335,7 +362,10 @@ var langlang = "en";
     filterInput.placeholder = t("filter");
     apiLabel.textContent = t("apiLabel");
     serverHelp.textContent = t("serverHelp");
+    playerDownloadDescription.textContent = t("playerDownloadDescription");
     downloadDescription.textContent = t("downloadDescription");
+    browserDescription.innerHTML = t("browserDescription");
+    windowsBrowserDescription.textContent = t("windowsBrowserDescription");
     serverOnlyDescription.textContent = t("serverOnlyDescription");
     serverReadmeLink.href = readmeBaseUrl + (lass === "en" ? "README.md" : "README_" + langlang + ".md");
   }
@@ -462,7 +492,7 @@ var langlang = "en";
 
   async function downloadFile(item, server, button) {
     let url;
-    try { url = resolveFileUrl(server, item.url); }
+    try { url = resolveFileUrl(server, item.downloadUrl || item.url); }
     catch (e) { setStatus(e.message || String(e)); return; }
 
     const filename = safeName(item.name || "download");
