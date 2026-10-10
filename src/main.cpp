@@ -34,6 +34,16 @@ static bool g_SwapChainOccluded = false;
 static UINT g_ResizeWidth = 0, g_ResizeHeight = 0;
 static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 
+static constexpr UINT kAiErrorUiMessage = WM_APP + 0x280;
+
+struct AiErrorUiPayload {
+    bool fatal{false};
+    std::string text;
+};
+
+static std::string g_aiErrorText;
+static bool g_aiErrorFatal = false;
+
 struct DirectMlUiAdapter {
     int index{-1};
     UINT vendorId{0};
@@ -206,6 +216,15 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_SYSCOMMAND:
         if ((wParam & 0xfff0) == SC_KEYMENU) return 0;
         break;
+    case kAiErrorUiMessage: {
+        auto* payload = reinterpret_cast<AiErrorUiPayload*>(lParam);
+        if (payload) {
+            g_aiErrorFatal = payload->fatal;
+            g_aiErrorText = payload->text;
+            delete payload;
+        }
+        return 0;
+    }
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -1395,7 +1414,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                    L"R800ZZDlnaServerWindow", nullptr};
     RegisterClassExW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName,
-                              L"r800zzXRdlnaServer 0.6",
+                              L"r800zzXRdlnaServer 0.8",
                               WS_OVERLAPPEDWINDOW, 100, 100, 820, 720,
                               nullptr, nullptr, wc.hInstance, nullptr);
 
@@ -1481,6 +1500,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
     DlnaServer server;
+    server.SetAiErrorCallback([hwnd](const AiErrorInfo& info) {
+        // The AI Error UI is reserved for failures that stop AI passthrough.
+        // Compatibility fallbacks and other recoverable diagnostics remain in
+        // the server log but are not surfaced as AI Error.
+        if (info.severity != "FATAL") {
+            return;
+        }
+
+        auto* payload = new AiErrorUiPayload();
+        payload->fatal = info.severity == "FATAL";
+        payload->text =
+            "GPU: " + info.gpu +
+            " | Mode: " + info.mode +
+            " | Codec: " + info.codec +
+            " | " + info.severity + ": " + info.message;
+        if (!PostMessageW(
+                hwnd, kAiErrorUiMessage, 0,
+                reinterpret_cast<LPARAM>(payload))) {
+            delete payload;
+        }
+    });
     WebXrHttpsServer webxrServer;
     const std::filesystem::path savedWebXrRoot = LoadWebXrRootSelection();
     if (!savedWebXrRoot.empty()) {
@@ -1512,9 +1552,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 }
             });
     };
-    if (ai_backend == 0 && saved_ai_stream_mode != 3) {
-        startCudaCapabilityProbe();
-    }
     bool video_files_only = LoadVideoFilesOnlySelection();
     std::filesystem::path selected_folder;
     std::vector<std::filesystem::path> folder_files;
@@ -1616,29 +1653,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             : 0;
     };
     auto refreshAiPrewarm = [&]() {
+        // AI initialization belongs to DLNA Server Start().  Merely selecting
+        // a file/backend/mode must not touch CUDA/DirectML/CPU.
+        if (!server.IsRunning()) return;
+
         const AiBackend backend = selectedAiBackend();
         const int device = selectedDirectMlDevice();
         if (!aiPassthroughEnabled() || first_selected_video.empty()) {
             server.SetAiPrewarm(false, {}, backend, device);
             return;
         }
-
-        if (backend == AiBackend::NvidiaCuda) {
-            if (!aiCapabilityChecked) {
-                startCudaCapabilityProbe();
-                server.SetAiPrewarm(false, {}, backend, device);
-                return;
-            }
-            if (!aiCapabilityAvailable) {
-                server.SetAiPrewarm(false, {}, backend, device);
-                return;
-            }
-        }
         server.SetAiPrewarm(true, first_selected_video, backend, device);
     };
-    if (ai_backend != 0) {
-        refreshAiPrewarm();
-    }
     auto selectedConversionBackend = [&]() {
         return conversion_backend == 0 ? AiBackend::NvidiaCuda :
             (conversion_backend == 1 ? AiBackend::DirectML : AiBackend::Cpu);
@@ -1689,19 +1715,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             aiCapabilityChecked = true;
             aiCapabilityAvailable = result.available;
             aiCapabilityMessage = result.message;
-            // The probe is CUDA-specific. Do not force DirectML/CPU mode OFF
-            // if the user changed backend while the async probe was running.
-            if (ai_backend == 0) {
-                if (!result.available) {
-                    ai_stream_mode = 3;
-                } else if (!ai_stream_mode_has_saved_or_user_value) {
-                    // Preserve the legacy first-run behavior: CUDA starts in
-                    // Alpha packed only when no AI mode has ever been saved.
-                    ai_stream_mode = 0;
-                }
-            }
+            // This probe is used only by CUDA file conversion.  DLNA Server
+            // startup performs its own selected-backend initialization, so a
+            // conversion probe result must never change the AI Passthrough mode.
             server.RecordAiCapabilityResult(result);
-            refreshAiPrewarm();
         }
 
         style.Colors[ImGuiCol_WindowBg] = server.IsRunning()
@@ -1882,6 +1899,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
         ImGui::Spacing();
         ImGui::TextUnformatted("AI Backend:");
+        if (server.IsRunning()) ImGui::BeginDisabled();
         const char* backendItems[] = {"NVIDIA CUDA", "DirectML", "CPU"};
         ImGui::SetNextItemWidth(260.0f);
         ImGui::Combo("##ai_backend", &ai_backend, backendItems, 3);
@@ -1905,9 +1923,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 }
             }
         }
+        if (server.IsRunning()) ImGui::EndDisabled();
 
         if (ai_backend != previous_ai_backend ||
             directml_adapter_choice != previous_directml_adapter_choice) {
+            g_aiErrorText.clear();
+            g_aiErrorFatal = false;
             if (ai_backend != previous_ai_backend) {
                 SaveAiBackendSelection(ai_backend);
             }
@@ -1922,42 +1943,42 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
         ImGui::TextUnformatted(uiText.aiMode);
         const int previousAiStreamMode = ai_stream_mode;
-        const bool aiChoicesDisabled = server.IsRunning() ||
-            (ai_backend == 0 && aiCapabilityChecked && !aiCapabilityAvailable);
-        if (aiChoicesDisabled) ImGui::BeginDisabled();
+        // All four modes may be selected while the server is running. The
+        // current RUN is left untouched; the selection is applied only at the
+        // next file change or explicit zero seek.
         ImGui::RadioButton("Alpha packed", &ai_stream_mode, 0);
         ImGui::SameLine();
         ImGui::RadioButton("Alpha WebM VP9", &ai_stream_mode, 1);
         ImGui::SameLine();
         ImGui::RadioButton("Chroma Key", &ai_stream_mode, 2);
-        if (aiChoicesDisabled) ImGui::EndDisabled();
         ImGui::SameLine();
-        if (server.IsRunning()) ImGui::BeginDisabled();
         ImGui::RadioButton("OFF", &ai_stream_mode, 3);
-        if (server.IsRunning()) ImGui::EndDisabled();
 
-        if (ai_stream_mode != previousAiStreamMode && !server.IsRunning()) {
+        if (ai_stream_mode != previousAiStreamMode) {
+            g_aiErrorText.clear();
+            g_aiErrorFatal = false;
             ai_stream_mode_has_saved_or_user_value = true;
-            refreshAiPrewarm();
+            SaveAiStreamModeSelection(ai_stream_mode);
+            if (server.IsRunning()) {
+                server.SetAiPassthroughMode(
+                    aiPassthroughEnabled(), selectedAiOutputMode());
+            } else {
+                refreshAiPrewarm();
+            }
         }
 
         if (ai_backend == 0) {
-            if (!aiCapabilityChecked) {
-                ImGui::TextDisabled("NVIDIA CUDA: Checking...");
-            } else if (!aiCapabilityAvailable) {
-                ImGui::TextDisabled(
-                    "NVIDIA CUDA: Unavailable - raw DLNA and CPU file conversion available");
-            } else if (aiPassthroughEnabled()) {
+            if (aiPassthroughEnabled()) {
                 if (first_selected_video.empty()) {
                     ImGui::TextDisabled("RVM: No selected video; non-video files are served raw");
+                } else if (server.IsRunning()) {
+                    ImGui::TextDisabled("RVM: Ready");
                 } else {
-                    ImGui::TextDisabled("RVM: %s", server.IsAiPrewarmReady() ? "Ready" : "Warming up");
+                    ImGui::TextDisabled(
+                        "NVIDIA CUDA: initializes when DLNA Server starts");
                 }
             } else {
-                ImGui::TextDisabled("NVIDIA CUDA: Available");
-            }
-            if (aiCapabilityChecked && !aiCapabilityAvailable) {
-                ImGui::TextWrapped("%s", aiCapabilityMessage.c_str());
+                ImGui::TextDisabled("NVIDIA CUDA: Selected");
             }
         } else if (ai_backend == 1) {
             if (directml_adapters.empty()) {
@@ -1965,14 +1986,23 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             } else if (aiPassthroughEnabled()) {
                 if (first_selected_video.empty()) {
                     ImGui::TextDisabled("RVM: No selected video; non-video files are served raw");
+                } else if (server.IsRunning()) {
+                    ImGui::TextDisabled("RVM: Ready");
                 } else {
-                    ImGui::TextDisabled("RVM: %s", server.IsAiPrewarmReady() ? "Ready" : "Warming up");
+                    ImGui::TextDisabled(
+                        "DirectML: initializes when DLNA Server starts");
                 }
             } else {
                 ImGui::TextDisabled("DirectML: Selected");
             }
         } else {
-            ImGui::TextDisabled("CPU backend: Selected");
+            if (aiPassthroughEnabled() && !first_selected_video.empty() &&
+                !server.IsRunning()) {
+                ImGui::TextDisabled(
+                    "CPU backend: initializes when DLNA Server starts");
+            } else {
+                ImGui::TextDisabled("CPU backend: Selected");
+            }
         }
 
         ImGui::Spacing();
@@ -1980,9 +2010,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
           const bool aiNeedsBackend =
             aiPassthroughEnabled() && !first_selected_video.empty();
           const bool backendReady = !aiNeedsBackend ||
-            (ai_backend == 0
-                ? (aiCapabilityChecked && aiCapabilityAvailable)
-                : (ai_backend == 1 ? directml_adapter_choice >= 0 : true));
+            (ai_backend == 1 ? directml_adapter_choice >= 0 : true);
           const bool can_start = backendReady &&
             !selected_files.empty() && selected_address >= 0 && !conversionRunning;
 
@@ -2021,6 +2049,28 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
         ImGui::SameLine();
         ImGui::Text("%s: %s", uiText.status, server.Status().c_str());
+
+        if (g_aiErrorText.empty()) {
+            ImGui::TextDisabled("AI Error: none");
+        } else {
+            const ImVec4 errorColor = g_aiErrorFatal
+                ? ImVec4(0.85f, 0.10f, 0.10f, 1.0f)
+                : ImVec4(0.85f, 0.45f, 0.05f, 1.0f);
+            ImGui::TextColored(errorColor, "AI Error:");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Copy##ai_error")) {
+                ImGui::SetClipboardText(g_aiErrorText.c_str());
+            }
+            ImGui::PushStyleColor(ImGuiCol_Text, errorColor);
+            ImGui::InputTextMultiline(
+                "##ai_error_text",
+                g_aiErrorText.data(),
+                g_aiErrorText.size() + 1,
+                ImVec2(ImGui::GetContentRegionAvail().x,
+                       ImGui::GetTextLineHeightWithSpacing() * 2.5f),
+                ImGuiInputTextFlags_ReadOnly);
+            ImGui::PopStyleColor();
+        }
 
         if (server.IsRunning()) {
             ImGui::Text("DLNA name: r800zzXRdlnaServer");
@@ -2334,6 +2384,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     conversionProcess.Stop(false);
     webxrServer.Stop();
     server.Stop();
+    server.SetAiErrorCallback({});
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
@@ -2345,5 +2396,4 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     CloseHandle(singleInstanceMutex);
     return 0;
 }
-
 

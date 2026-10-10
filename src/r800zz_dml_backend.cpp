@@ -62,6 +62,18 @@ void logLine(const std::string& s) {
     std::cerr << "CPP_GPU: " << s << std::endl;
 }
 
+void logPersistentFallback(const std::string& s) {
+    // Stable tag for the GUI. This must remain visible even when playback
+    // continues through a compatibility fallback.
+    logLine("PERSISTENT_ERROR: FALLBACK: " + s);
+}
+
+void logPersistentFatal(const std::string& s) {
+    // Stable tag for the GUI. Fatal errors stop the current operation instead
+    // of continuing in an undefined/broken state.
+    logLine("PERSISTENT_ERROR: FATAL: " + s);
+}
+
 std::filesystem::path partialOutputPath(
         const std::filesystem::path& finalOutput) {
     auto partial = finalOutput;
@@ -349,6 +361,8 @@ struct Pipeline {
     bool encoderGpuDirect = false;
     UINT selectedVendorId = 0;
     std::wstring selectedAdapterName;
+    bool directMlFastPathDisabled = false;
+    bool directMlFallbackLogged = false;
 
     AVFrame* webmCpuFrame = nullptr;
     AVFrame* cpuNv12Frame = nullptr;
@@ -378,6 +392,23 @@ struct Pipeline {
     int64_t lastSubmittedVideoPts = AV_NOPTS_VALUE;
     int64_t lastMuxVideoDts = AV_NOPTS_VALUE;
     std::deque<AVPacket*> pendingAudioPackets;
+    // When a seek lands after the source video track has already ended, keep
+    // the last decoded pre-seek frame and emit it once at the requested time.
+    // After that, no synthetic video packets are added; the remaining source
+    // audio is muxed normally until its own EOF.
+    std::unique_ptr<AVFrame, AvFrameCloser> preSeekVideoAnchor;
+
+    // AMD DirectML GPU-only encode pipeline. The previous D3D11 NV12 encoder
+    // surface is submitted only after the next GPU frame has been prepared.
+    // This lets the GPU-side BGRA->NV12 conversion overlap with DirectML work
+    // instead of serializing immediately inside avcodec_send_frame().
+    // No frame data is copied through CPU memory.
+    std::unique_ptr<AVFrame, AvFrameCloser> pendingGpuEncodeFrame;
+    double pendingGpuInferMs = 0.0;
+    double pendingGpuPrepareMs = 0.0;
+    int64_t pendingGpuVideoSourceUs = AV_NOPTS_VALUE;
+    bool pendingGpuTrace = false;
+
     double inferMsAccum = 0.0;
     double packMsAccum = 0.0;
     double encodeMsAccum = 0.0;
@@ -398,6 +429,7 @@ struct Pipeline {
     ~Pipeline() { cleanup(); }
 
     void cleanup() {
+        pendingGpuEncodeFrame.reset();
         for (AVPacket* packet : pendingAudioPackets) av_packet_free(&packet);
         pendingAudioPackets.clear();
 
@@ -477,6 +509,60 @@ struct Pipeline {
     }
 
 
+    bool initD3d11Device(std::string& error) {
+        if (args.backend != RvmBackend::DirectML) return true;
+        if (d3d11Device) return true;
+
+        if (externalD3d11Device) {
+            d3d11Device = av_buffer_ref(externalD3d11Device);
+            if (!d3d11Device) {
+                error = "av_buffer_ref resident D3D11 device failed";
+                return false;
+            }
+            logLine("resident FFmpeg D3D11 device reused");
+        } else {
+            const auto adapters = enumerateAdapters();
+            if (args.device < 0) args.device = chooseDefaultHardwareAdapter(adapters);
+            if (args.device < 0) {
+                error = "No hardware DXGI adapter was found";
+                return false;
+            }
+            const auto selected = std::find_if(
+                adapters.begin(), adapters.end(),
+                [&](const AdapterInfo& a) { return a.index == args.device; });
+            if (selected == adapters.end()) {
+                error = "DXGI adapter " + std::to_string(args.device) + " not found";
+                return false;
+            }
+            selectedVendorId = selected->vendorId;
+            selectedAdapterName = selected->description;
+
+            AVBufferRef* raw = nullptr;
+            const std::string adapterText = std::to_string(args.device);
+            const int rc = av_hwdevice_ctx_create(
+                &raw, AV_HWDEVICE_TYPE_D3D11VA,
+                adapterText.c_str(), nullptr, 0);
+            if (rc < 0 || !raw) {
+                if (raw) av_buffer_unref(&raw);
+                error = "av_hwdevice_ctx_create(D3D11VA): " + fferr(rc);
+                return false;
+            }
+            d3d11Device = raw;
+        }
+
+        if (selectedAdapterName.empty()) {
+            const auto adapters = enumerateAdapters();
+            const auto selected = std::find_if(
+                adapters.begin(), adapters.end(),
+                [&](const AdapterInfo& a) { return a.index == args.device; });
+            if (selected != adapters.end()) {
+                selectedVendorId = selected->vendorId;
+                selectedAdapterName = selected->description;
+            }
+        }
+        return true;
+    }
+
     bool initD3d11Decoder(std::string& error) {
         const AVCodec* decoder = avcodec_find_decoder(inVideo->codecpar->codec_id);
         if (!decoder) {
@@ -498,53 +584,7 @@ struct Pipeline {
         dec->pkt_timebase = inVideo->time_base;
 
         if (args.backend == RvmBackend::DirectML) {
-            if (externalD3d11Device) {
-                d3d11Device = av_buffer_ref(externalD3d11Device);
-                if (!d3d11Device) {
-                    error = "av_buffer_ref resident D3D11 device failed";
-                    return false;
-                }
-                logLine("resident FFmpeg D3D11 device reused");
-            } else {
-                const auto adapters = enumerateAdapters();
-                if (args.device < 0) args.device = chooseDefaultHardwareAdapter(adapters);
-                if (args.device < 0) {
-                    error = "No hardware DXGI adapter was found";
-                    return false;
-                }
-                const auto selected = std::find_if(
-                    adapters.begin(), adapters.end(),
-                    [&](const AdapterInfo& a) { return a.index == args.device; });
-                if (selected == adapters.end()) {
-                    error = "DXGI adapter " + std::to_string(args.device) + " not found";
-                    return false;
-                }
-                selectedVendorId = selected->vendorId;
-                selectedAdapterName = selected->description;
-
-                AVBufferRef* raw = nullptr;
-                const std::string adapterText = std::to_string(args.device);
-                rc = av_hwdevice_ctx_create(
-                    &raw, AV_HWDEVICE_TYPE_D3D11VA,
-                    adapterText.c_str(), nullptr, 0);
-                if (rc < 0 || !raw) {
-                    if (raw) av_buffer_unref(&raw);
-                    error = "av_hwdevice_ctx_create(D3D11VA): " + fferr(rc);
-                    return false;
-                }
-                d3d11Device = raw;
-            }
-
-            if (selectedAdapterName.empty()) {
-                const auto adapters = enumerateAdapters();
-                const auto selected = std::find_if(
-                    adapters.begin(), adapters.end(),
-                    [&](const AdapterInfo& a) { return a.index == args.device; });
-                if (selected != adapters.end()) {
-                    selectedVendorId = selected->vendorId;
-                    selectedAdapterName = selected->description;
-                }
-            }
+            if (!initD3d11Device(error)) return false;
 
             dec->hw_device_ctx = av_buffer_ref(d3d11Device);
             if (!dec->hw_device_ctx) {
@@ -787,11 +827,22 @@ struct Pipeline {
                 frames->sw_format = AV_PIX_FMT_NV12;
                 frames->width = width;
                 frames->height = height;
-                frames->initial_pool_size = 16;
+                // RX 570/older AMD drivers can reject a large NV12 texture array
+                // carrying VIDEO_ENCODER bind flags with E_INVALIDARG. For AMD,
+                // use FFmpeg's dynamic single-texture pool (ArraySize=1) and the
+                // same encoder/render-target bind flags used by scale_d3d11.
+                // Other vendors keep the existing pool behavior unchanged.
+                frames->initial_pool_size = selectedVendorId == 0x1002 ? 0 : 16;
                 auto* d3d11Frames =
                     reinterpret_cast<AVD3D11VAFramesContext*>(frames->hwctx);
                 if (d3d11Frames) {
-                    d3d11Frames->BindFlags |= D3D11_BIND_VIDEO_ENCODER;
+                    if (selectedVendorId == 0x1002) {
+                        d3d11Frames->BindFlags =
+                            D3D11_BIND_RENDER_TARGET | D3D11_BIND_VIDEO_ENCODER;
+                        d3d11Frames->MiscFlags = 0;
+                    } else {
+                        d3d11Frames->BindFlags |= D3D11_BIND_VIDEO_ENCODER;
+                    }
                 }
                 const int framesRc = av_hwframe_ctx_init(framesRef);
                 if (framesRc < 0) {
@@ -832,6 +883,10 @@ struct Pipeline {
                 av_dict_set(&opts, "zerolatency", "1", 0);
                 av_dict_set(&opts, "delay", "0", 0);
                 av_dict_set(&opts, "bf", "0", 0);
+            } else if (std::string(encoderName) == "hevc_amf") {
+                av_dict_set(&opts, "preset", "speed", 0);
+                av_dict_set(&opts, "qp",
+                            std::to_string(args.qp).c_str(), 0);
             } else if (std::string(encoderName) == "libx265") {
                 av_dict_set(&opts, "preset", "ultrafast", 0);
                 av_dict_set(&opts, "crf",
@@ -877,9 +932,17 @@ struct Pipeline {
                     if (tryOpenEncoder(name, true)) break;
                 }
             }
+            // Prefer D3D11 GPU-direct. If it cannot be opened, fall back to
+            // the existing compatibility encoder path instead of continuing
+            // with a broken GPU path or stopping playback.
             if (!enc) {
                 for (const char* name : encoderCandidates) {
                     if (tryOpenEncoder(name, false)) break;
+                }
+                if (enc && chosenEncoder) {
+                    logPersistentFallback(
+                        std::string("DirectML D3D11 encoder unavailable; using compatibility encoder ") +
+                        chosenEncoder->name);
                 }
             }
         }
@@ -889,11 +952,18 @@ struct Pipeline {
             if (!encoderOpenErrors.empty()) {
                 error += " (" + encoderOpenErrors + ")";
             }
+            logPersistentFatal(error);
             return false;
         }
 
         logLine(std::string("Output encoder: ") + chosenEncoder->name +
                 (encoderGpuDirect ? " pixfmt=d3d11 GPU_DIRECT" : ""));
+        if (selectedVendorId == 0x1002 &&
+            args.backend == RvmBackend::DirectML &&
+            encoderGpuDirect &&
+            std::string(chosenEncoder->name) == "hevc_amf") {
+            logLine("AMD D3D11 AMF pipeline: GPU_ONLY delay=1");
+        }
 
         outVideo = avformat_new_stream(outFmt, nullptr);
         if (!outVideo) {
@@ -1460,9 +1530,11 @@ struct Pipeline {
                 : RvmGpuCompositeMode::AlphaPacked;
 
         // DirectML realtime fast path: keep decode, RVM/composite, and
-        // encoder handoff on the selected GPU. RvmOrt owns D3D11/D3D12
-        // synchronization so the normal path does not block the CPU per frame.
-        if (encoderGpuDirect &&
+        // encoder handoff on the selected GPU. If this path is unavailable or
+        // fails, switch to the existing compatibility fallback and make that
+        // event persistent/visible in the GUI.
+        if (!directMlFastPathDisabled &&
+            encoderGpuDirect &&
             input->format == AV_PIX_FMT_D3D11 &&
             input->data[0]) {
             auto* sourceTexture =
@@ -1501,33 +1573,78 @@ struct Pipeline {
 
                 const auto inferStart =
                     std::chrono::steady_clock::now();
-                if (!rvm->runGpuCompositeNv12(
+                std::string fastPathError;
+                if (rvm->runGpuCompositeNv12(
                         mode,
                         RvmAlphaInputFormat::Nv12,
                         nullptr, 0, nullptr, 0, nullptr, 0,
                         nullptr, 0, nullptr, 0,
-                        error,
+                        fastPathError,
                         sourceTexture,
                         sourceArraySlice,
                         nullptr,
                         encoderTexture,
                         encoderArraySlice)) {
+                    const auto inferDone =
+                        std::chrono::steady_clock::now();
+
+                    inferMsThisFrame =
+                        std::chrono::duration<double, std::milli>(
+                            inferDone - inferStart).count();
+                    prepareMsThisFrame = 0.0;
+                    encodeFrame = hwEncodeFrame.get();
+                    return true;
+                }
+
+                directMlFastPathDisabled = true;
+                hwEncodeFrame.reset();
+                if (!directMlFallbackLogged) {
+                    logPersistentFallback(
+                        "DirectML GPU fast path failed; using compatibility fallback: " +
+                        fastPathError);
+                    directMlFallbackLogged = true;
+                }
+                if (!rvm->resetState(error)) {
+                    error =
+                        "DirectML GPU fast path failed and RVM reset for fallback failed: " +
+                        fastPathError + "; reset=" + error;
                     return false;
                 }
-                const auto inferDone =
-                    std::chrono::steady_clock::now();
-
-                inferMsThisFrame =
-                    std::chrono::duration<double, std::milli>(
-                        inferDone - inferStart).count();
-                prepareMsThisFrame = 0.0;
-                encodeFrame = hwEncodeFrame.get();
-                return true;
+                error.clear();
             }
         }
 
-        // Same media flow as CUDA fallback: one decoded frame in, one completed
-        // encoded frame out. Only the GPU implementation differs.
+        if (!directMlFastPathDisabled) {
+            std::string reason;
+            if (!encoderGpuDirect) {
+                reason = "D3D11 GPU-direct encoder is unavailable";
+            } else if (input->format != AV_PIX_FMT_D3D11 || !input->data[0]) {
+                const char* fmt = av_get_pix_fmt_name(
+                    static_cast<AVPixelFormat>(input->format));
+                reason = std::string("decoder output is ") +
+                    (fmt ? fmt : "unknown") + " instead of D3D11";
+            } else {
+                auto* sourceTexture =
+                    reinterpret_cast<ID3D11Texture2D*>(input->data[0]);
+                D3D11_TEXTURE2D_DESC sourceDesc{};
+                sourceTexture->GetDesc(&sourceDesc);
+                reason =
+                    "D3D11 decoder texture is not NV12; DXGI format=" +
+                    std::to_string(
+                        static_cast<unsigned int>(sourceDesc.Format));
+            }
+
+            directMlFastPathDisabled = true;
+            if (!directMlFallbackLogged) {
+                logPersistentFallback(
+                    "DirectML GPU fast path unavailable; using compatibility fallback: " +
+                    reason);
+                directMlFallbackLogged = true;
+            }
+        }
+
+        // Compatibility fallback. This path is intentionally used only after
+        // the normal DirectML GPU path is unavailable or has actually failed.
         std::unique_ptr<AVFrame, AvFrameCloser> transferred;
         AVFrame* work = nullptr;
         if (!transferToCpuIfNeeded(input, transferred, work, error)) {
@@ -1653,6 +1770,95 @@ struct Pipeline {
         return true;
     }
 
+    bool submitPreparedVideoFrame(
+            AVFrame* encodeFrame,
+            double inferMsThisFrame,
+            double prepareMsThisFrame,
+            bool trace,
+            int64_t videoSourceUs,
+            std::string& error) {
+        if (!encodeFrame) {
+            error = "video frame was not prepared";
+            return false;
+        }
+
+        currentVideoSourceUs = videoSourceUs;
+
+        const auto encodeStart =
+            std::chrono::steady_clock::now();
+        const int rc = avcodec_send_frame(enc, encodeFrame);
+        if (rc < 0) {
+            error = "avcodec_send_frame: " + fferr(rc);
+            return false;
+        }
+        if (!writeEncodedPackets(error)) return false;
+        const auto encodeDone =
+            std::chrono::steady_clock::now();
+
+        inferMsAccum += inferMsThisFrame;
+        packMsAccum += prepareMsThisFrame;
+        encodeMsAccum +=
+            std::chrono::duration<double, std::milli>(
+                encodeDone - encodeStart).count();
+
+        ++processed;
+        if (!playbackClockStarted) {
+            wallStart = std::chrono::steady_clock::now();
+            statsStart = wallStart;
+            playbackClockStarted = true;
+        }
+
+        if (trace) {
+            logLine("first-frame stage=completed");
+            firstFrameTrace = false;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (processed == 1 ||
+            std::chrono::duration<double>(
+                now - statsStart).count() >= 2.0) {
+            const double total =
+                static_cast<double>(processed + dropped);
+            const double fpsOut =
+                static_cast<double>(processed) /
+                std::max(
+                    0.001,
+                    std::chrono::duration<double>(
+                        now - wallStart).count());
+            std::ostringstream out;
+            out << std::fixed << std::setprecision(2)
+                << "realtime fpsOut=" << fpsOut
+                << " processed=" << processed
+                << " dropped=" << dropped
+                << " dropPct="
+                << (total > 0.0
+                    ? 100.0 *
+                      static_cast<double>(dropped) /
+                      total
+                    : 0.0)
+                << " avgRvmMs="
+                << (processed
+                    ? inferMsAccum /
+                      static_cast<double>(processed)
+                    : 0.0)
+                << " avgPrepareMs="
+                << (processed
+                    ? packMsAccum /
+                      static_cast<double>(processed)
+                    : 0.0)
+                << " avgEncodeMuxMs="
+                << (processed
+                    ? encodeMsAccum /
+                      static_cast<double>(processed)
+                    : 0.0);
+            logLine(out.str());
+            statsStart = now;
+        }
+
+        logConversionProgress();
+        return true;
+    }
+
     bool processFrame(AVFrame* frame, std::string& error) {
         const int64_t pts =
             frame->best_effort_timestamp != AV_NOPTS_VALUE
@@ -1666,15 +1872,26 @@ struct Pipeline {
                     pts, inVideo->time_base,
                     AV_TIME_BASE_Q);
             if (frameUs < requestedStartTimestampUs) {
+                if (!args.previewOnly && audioIndex >= 0 && outAudio) {
+                    AVFrame* anchor = av_frame_clone(frame);
+                    if (!anchor) {
+                        error = "av_frame_clone audio-tail seek anchor failed";
+                        return false;
+                    }
+                    preSeekVideoAnchor.reset(anchor);
+                }
                 return true;
             }
         }
 
+        if (preSeekVideoAnchor && frame != preSeekVideoAnchor.get()) {
+            preSeekVideoAnchor.reset();
+        }
         // This is copied from the working CUDA Pipeline.
         if (paceOrDrop(pts)) return true;
 
         ++decodedFrames;
-        const bool trace = firstFrameTrace;
+        const bool trace = firstFrameTrace && !pendingGpuEncodeFrame;
         if (trace) {
             std::ostringstream t;
             t << "first-frame stage=decoded frameFormat="
@@ -1726,7 +1943,7 @@ struct Pipeline {
             return false;
         }
 
-        currentVideoSourceUs =
+        const int64_t videoSourceUs =
             pts == AV_NOPTS_VALUE
                 ? AV_NOPTS_VALUE
                 : av_rescale_q(
@@ -1754,79 +1971,49 @@ struct Pipeline {
         lastSubmittedVideoPts = encoderPts;
         encodeFrame->pts = encoderPts;
 
-        const auto encodeStart =
-            std::chrono::steady_clock::now();
-        int rc = avcodec_send_frame(enc, encodeFrame);
-        if (rc < 0) {
-            error = "avcodec_send_frame: " + fferr(rc);
-            return false;
-        }
-        if (!writeEncodedPackets(error)) return false;
-        const auto encodeDone =
-            std::chrono::steady_clock::now();
+        const bool pipelineAmdGpuEncode =
+            args.backend == RvmBackend::DirectML &&
+            encoderGpuDirect &&
+            selectedVendorId == 0x1002 &&
+            args.outputMode != Args::OutputMode::WebmVp9Alpha;
 
-        inferMsAccum += inferMsThisFrame;
-        packMsAccum += prepareMsThisFrame;
-        encodeMsAccum +=
-            std::chrono::duration<double, std::milli>(
-                encodeDone - encodeStart).count();
+        if (pipelineAmdGpuEncode) {
+            // This frame's DirectML preparation is queued after the previous
+            // frame's D3D11 BGRA->NV12 conversion. By submitting the previous
+            // encoder surface only now, AMF no longer has to serialize
+            // immediately on that conversion. The frame itself remains GPU-only.
+            if (pendingGpuEncodeFrame) {
+                if (!submitPreparedVideoFrame(
+                        pendingGpuEncodeFrame.get(),
+                        pendingGpuInferMs,
+                        pendingGpuPrepareMs,
+                        pendingGpuTrace,
+                        pendingGpuVideoSourceUs,
+                        error)) {
+                    return false;
+                }
+                pendingGpuEncodeFrame.reset();
+            }
 
-        ++processed;
-        if (!playbackClockStarted) {
-            wallStart = std::chrono::steady_clock::now();
-            statsStart = wallStart;
-            playbackClockStarted = true;
-        }
-
-        if (trace) {
-            logLine("first-frame stage=completed");
-            firstFrameTrace = false;
-        }
-
-        const auto now = std::chrono::steady_clock::now();
-        if (processed == 1 ||
-            std::chrono::duration<double>(
-                now - statsStart).count() >= 2.0) {
-            const double total =
-                static_cast<double>(processed + dropped);
-            const double fpsOut =
-                static_cast<double>(processed) /
-                std::max(
-                    0.001,
-                    std::chrono::duration<double>(
-                        now - wallStart).count());
-            std::ostringstream s;
-            s << std::fixed << std::setprecision(2)
-              << "realtime fpsOut=" << fpsOut
-              << " processed=" << processed
-              << " dropped=" << dropped
-              << " dropPct="
-              << (total > 0.0
-                    ? 100.0 *
-                      static_cast<double>(dropped) /
-                      total
-                    : 0.0)
-              << " avgRvmMs="
-              << (processed
-                    ? inferMsAccum /
-                      static_cast<double>(processed)
-                    : 0.0)
-              << " avgPrepareMs="
-              << (processed
-                    ? packMsAccum /
-                      static_cast<double>(processed)
-                    : 0.0)
-              << " avgEncodeMuxMs="
-              << (processed
-                    ? encodeMsAccum /
-                      static_cast<double>(processed)
-                    : 0.0);
-            logLine(s.str());
-            statsStart = now;
+            if (!hwEncodeFrame) {
+                error = "AMD GPU encode pipeline requires D3D11 encoder frame";
+                return false;
+            }
+            pendingGpuEncodeFrame = std::move(hwEncodeFrame);
+            pendingGpuInferMs = inferMsThisFrame;
+            pendingGpuPrepareMs = prepareMsThisFrame;
+            pendingGpuVideoSourceUs = videoSourceUs;
+            pendingGpuTrace = trace;
+            return true;
         }
 
-        logConversionProgress();
-        return true;
+        return submitPreparedVideoFrame(
+            encodeFrame,
+            inferMsThisFrame,
+            prepareMsThisFrame,
+            trace,
+            videoSourceUs,
+            error);
     }
 
 
@@ -2082,14 +2269,63 @@ struct Pipeline {
         return true;
     }
 
-    void discardAudioAfterLastVideo() {
-        const size_t count = pendingAudioPackets.size();
-        for (AVPacket* packet : pendingAudioPackets) av_packet_free(&packet);
-        pendingAudioPackets.clear();
-        if (count > 0) {
-            logLine("discarded audio packets beyond final video PTS=" +
-                    std::to_string(count));
+    bool drainAudioAfterLastVideo(std::string& error) {
+        // The source audio track may continue after the final source video
+        // frame. Keep muxing those original audio packets normally. Do not
+        // pace network output, force interleave flushes, or manufacture a
+        // second video packet at media EOF; playback timing comes from PTS.
+        while (!pendingAudioPackets.empty()) {
+            AVPacket* packet = pendingAudioPackets.front();
+            pendingAudioPackets.pop_front();
+
+            const int64_t audioUs = audioPacketTimestampUs(packet);
+            if (firstVideoOutputUs != AV_NOPTS_VALUE &&
+                audioUs != AV_NOPTS_VALUE && audioUs < firstVideoOutputUs) {
+                av_packet_free(&packet);
+                continue;
+            }
+
+            const bool ok = writeAudioPacketNow(packet, error);
+            av_packet_free(&packet);
+            if (!ok) return false;
         }
+        return true;
+    }
+
+    bool hasPendingAudioAtOrAfterRequestedStart() const {
+        if (requestedStartTimestampUs <= 0 || !inAudio) return false;
+        for (const AVPacket* packet : pendingAudioPackets) {
+            const int64_t audioUs = audioPacketTimestampUs(packet);
+            if (audioUs != AV_NOPTS_VALUE &&
+                audioUs >= requestedStartTimestampUs) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool emitAudioTailSeekAnchor(std::string& error) {
+        if (videoOutputStarted || requestedStartTimestampUs <= 0 ||
+            !preSeekVideoAnchor || !hasPendingAudioAtOrAfterRequestedStart()) {
+            return true;
+        }
+
+        // The requested time is after the final source video frame but still
+        // inside the source audio track. Send the real final picture once at
+        // the requested timestamp so the client can initialize its video
+        // decoder. From here to EOF, send no more video; only original audio
+        // packets continue with their existing timestamps.
+        const int64_t anchorPts = av_rescale_q(
+            requestedStartTimestampUs, AV_TIME_BASE_Q, inVideo->time_base);
+        preSeekVideoAnchor->pts = anchorPts;
+        preSeekVideoAnchor->best_effort_timestamp = anchorPts;
+        logLine("audio-tail seek anchor startMs=" +
+                std::to_string(args.startMs));
+
+        AVFrame* anchor = preSeekVideoAnchor.get();
+        const bool ok = processFrame(anchor, error);
+        preSeekVideoAnchor.reset();
+        return ok;
     }
 
     bool drainDecoder(std::string& error) {
@@ -2173,7 +2409,21 @@ struct Pipeline {
             return false;
         }
         if (rc >= 0 && !drainDecoder(error)) return false;
+        if (!args.previewOnly && !emitAudioTailSeekAnchor(error)) return false;
         if (!args.previewOnly) {
+            if (pendingGpuEncodeFrame) {
+                if (!submitPreparedVideoFrame(
+                        pendingGpuEncodeFrame.get(),
+                        pendingGpuInferMs,
+                        pendingGpuPrepareMs,
+                        pendingGpuTrace,
+                        pendingGpuVideoSourceUs,
+                        error)) {
+                    return false;
+                }
+                pendingGpuEncodeFrame.reset();
+            }
+
             rc = avcodec_send_frame(enc, nullptr);
             if (rc < 0 && rc != AVERROR_EOF) {
                 error = "avcodec_send_frame flush: " + fferr(rc);
@@ -2181,7 +2431,7 @@ struct Pipeline {
             }
             if (rc >= 0 && !writeEncodedPackets(error)) return false;
             if (!drainPendingAudio(error)) return false;
-            discardAudioAfterLastVideo();
+            if (!drainAudioAfterLastVideo(error)) return false;
             if (audioTranscode && !flushAudioTranscode(error)) return false;
             rc = av_write_trailer(outFmt);
             if (rc < 0) {
@@ -2204,7 +2454,7 @@ int runResident(Args base) {
 
     std::string error;
     if (!warm.initInput(error) ||
-        !warm.initD3d11Decoder(error) ||
+        !warm.initD3d11Device(error) ||
         !warm.initRvm(error)) {
         logLine("RESIDENT_ERROR init: " + error);
         return 20;
@@ -2357,9 +2607,10 @@ int runResident(Args base) {
 
                     if (win32 != ERROR_PIPE_BUSY &&
                         win32 != ERROR_FILE_NOT_FOUND) {
-                        logLine(
-                            "RESIDENT_STREAM_ERROR open output pipe Win32=" +
-                            std::to_string(win32));
+                        const std::string pipeError =
+                            "open output pipe Win32=" + std::to_string(win32);
+                        logPersistentFatal(pipeError);
+                        logLine("RESIDENT_STREAM_ERROR " + pipeError);
                         return;
                     }
 
@@ -2367,8 +2618,8 @@ int runResident(Args base) {
                             std::chrono::seconds>(
                             std::chrono::steady_clock::now() -
                             connectBegin).count() >= 120) {
-                        logLine(
-                            "RESIDENT_STREAM_ERROR output pipe timeout");
+                        logPersistentFatal("output pipe timeout");
+                        logLine("RESIDENT_STREAM_ERROR output pipe timeout");
                         return;
                     }
 
@@ -2414,11 +2665,15 @@ int runResident(Args base) {
                         !p.initRvm(runError) ||
                         !p.initEncoderAndMuxer(runError) ||
                         !p.initPreview(runError)) {
+                        logPersistentFatal(
+                            "resident stream init failed: " + runError);
                         logLine(
                             "ERROR resident stream init: " +
                             runError);
                         streamCode = 10;
                     } else if (!p.run(runError)) {
+                        logPersistentFatal(
+                            "resident stream run failed: " + runError);
                         logLine(
                             "ERROR resident stream run: " +
                             runError);
@@ -2487,8 +2742,10 @@ R800zzDmlResidentSession* R800zzCreateDmlResidentSession(
 
     Pipeline warm;
     warm.args = base;
+    // Startup readiness checks the selected DirectML device + RVM path only.
+    // Codec-specific decoder opening belongs to the actual stream.
     if (!warm.initInput(error) ||
-        !warm.initD3d11Decoder(error) ||
+        !warm.initD3d11Device(error) ||
         !warm.initRvm(error)) {
         return nullptr;
     }
@@ -2638,6 +2895,8 @@ static int runDmlBackendWide(int argc, wchar_t** argv) {
     if (args.offlineConvert) {
         if (args.outputFile.empty() ||
             args.outputFile == args.input) {
+            logPersistentFatal(
+                "conversion output must be different from input");
             logLine(
                 "ERROR conversion output must be different from input");
             return 5;
@@ -2666,9 +2925,11 @@ static int runDmlBackendWide(int argc, wchar_t** argv) {
             !p.initRvm(error) ||
             !p.initEncoderAndMuxer(error) ||
             !p.initPreview(error)) {
+            logPersistentFatal("init failed: " + error);
             logLine("ERROR init: " + error);
             exitCode = 10;
         } else if (!p.run(error)) {
+            logPersistentFatal("run failed: " + error);
             logLine("ERROR run: " + error);
             exitCode = 11;
         }
@@ -2684,6 +2945,7 @@ static int runDmlBackendWide(int argc, wchar_t** argv) {
             partialOutput,
             finalOutput,
             error)) {
+        logPersistentFatal("conversion finalize failed: " + error);
         logLine(
             "ERROR conversion finalize: " +
             error);
@@ -2722,3 +2984,4 @@ int RunR800zzDmlBackend(int argc, char** argv) {
     for (auto& value : wideArgs) wideArgv.push_back(value.data());
     return runDmlBackendWide(argc, wideArgv.data());
 }
+

@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -28,6 +29,14 @@ enum class AiBackend {
 
 struct AiCapabilityResult {
     bool available{false};
+    std::string message;
+};
+
+struct AiErrorInfo {
+    std::string severity;
+    std::string gpu;
+    std::string mode;
+    std::string codec;
     std::string message;
 };
 
@@ -57,11 +66,17 @@ public:
                bool video_files_only = true);
     void Stop();
 
-    // AI worker lifetime follows the selected AI Passthrough mode, not an HTTP request.
-    // Backend/device are supplied here because prewarm can start before DLNA Server Start().
+    // AI worker initialization starts from DLNA Server Start() when AI
+    // Passthrough is enabled. Backend/device changes while running can reuse
+    // this helper, but merely selecting UI options must not initialize a GPU.
     bool SetAiPrewarm(bool enabled, const std::filesystem::path& media_file,
                       AiBackend ai_backend, int directml_device);
     bool IsAiPrewarmReady() const;
+    // While the server is running, AI ON/OFF and output-mode selection are
+    // pending only. The active stream keeps its current state until the next
+    // file change or explicit zero seek starts a new RUN.
+    void SetAiPassthroughMode(bool enabled, AiOutputMode mode);
+    void SetAiOutputMode(AiOutputMode mode);
 
     bool IsRunning() const { return running_.load(); }
     uint16_t Port() const { return http_port_; }
@@ -71,6 +86,7 @@ public:
     std::vector<std::string> Logs() const;
     void ClearLogs();
     void RecordAiCapabilityResult(const AiCapabilityResult& result);
+    void SetAiErrorCallback(std::function<void(const AiErrorInfo&)> callback);
 
 private:
     bool SetupHttpListener();
@@ -112,6 +128,15 @@ private:
 
     void AddLog(const std::string& text);
     void SetStatus(const std::string& text);
+    void HandleWorkerDiagnosticLine(const std::string& line,
+                                    std::string& gpu,
+                                    std::string& mode,
+                                    std::string& codec);
+    void ReportAiError(const std::string& severity,
+                       const std::string& gpu,
+                       const std::string& mode,
+                       const std::string& codec,
+                       const std::string& message);
 
     std::string DeviceDescriptionXml() const;
     std::string ContentDirectoryScpdXml() const;
@@ -144,8 +169,18 @@ private:
     std::vector<DirectoryItem> directory_items_;
     std::string advertised_ip_;
     std::string uuid_;
-    bool ai_passthrough_{false};
+    // ai_passthrough_ is the state used for new media requests. The GUI can
+    // queue a different ON/OFF state without mutating an in-flight stream.
+    std::atomic<bool> ai_passthrough_{false};
+    mutable std::mutex ai_mode_mutex_;
+    bool selected_ai_passthrough_{false};
+    bool ai_passthrough_change_pending_{false};
+    // ai_output_mode_ is the UI-selected mode. active_ai_output_mode_ is the
+    // mode used by the current RUN.
     AiOutputMode ai_output_mode_{AiOutputMode::AlphaPackedHevc};
+    AiOutputMode active_ai_output_mode_{AiOutputMode::AlphaPackedHevc};
+    bool ai_output_mode_change_pending_{false};
+    uint32_t active_ai_media_id_{0};
     AiBackend ai_backend_{AiBackend::NvidiaCuda};
     int directml_device_{0};
     bool video_files_only_{true};
@@ -168,5 +203,8 @@ private:
     mutable std::mutex state_mutex_;
     std::string status_;
     std::vector<std::string> logs_;
+
+    mutable std::mutex ai_error_callback_mutex_;
+    std::function<void(const AiErrorInfo&)> ai_error_callback_;
 };
 

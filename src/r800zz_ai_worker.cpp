@@ -359,11 +359,6 @@ int probeGpuSupport(const std::filesystem::path& model, int device) {
     }
     const size_t cudnnVersion = cudnnGetVersionFn();
     FreeLibrary(cudnnModule);
-    if (cudnnVersion < 90700) {
-        logLine("PROBE_ERROR cuDNN is too old: version=" +
-                std::to_string(cudnnVersion) + " requires >=90700");
-        return 33;
-    }
 
     int deviceCount = 0;
     cudaError_t ce = cudaGetDeviceCount(&deviceCount);
@@ -413,6 +408,12 @@ int probeGpuSupport(const std::filesystem::path& model, int device) {
     if (ce != cudaSuccess) {
         return fail(38, "cudaGetDeviceProperties failed: " +
                         std::string(cudaGetErrorString(ce)));
+    }
+    // Apply the cuDNN 9.7+ requirement only to CUDA compute capability 12.x.
+    // Do not reject earlier CUDA-capable GPUs.
+    if (properties.major == 12 && cudnnVersion < 90700) {
+        return fail(33, "cuDNN is too old for CUDA compute capability 12.x: version=" +
+                        std::to_string(cudnnVersion) + " requires >=90700");
     }
     ce = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
     if (ce != cudaSuccess) {
@@ -638,6 +639,11 @@ struct Pipeline {
     int64_t lastSubmittedVideoPts = AV_NOPTS_VALUE;
     int64_t lastMuxVideoDts = AV_NOPTS_VALUE;
     std::deque<AVPacket*> pendingAudioPackets;
+    // When a seek lands after the source video track has already ended, keep
+    // the last decoded pre-seek frame and emit it once at the requested time.
+    // After that, no synthetic video packets are added; the remaining source
+    // audio is muxed normally until its own EOF.
+    std::unique_ptr<AVFrame, AvFrameCloser> preSeekVideoAnchor;
     std::atomic<bool>* cancelFlag = nullptr;
     double inferMsAccum = 0.0;
     double packMsAccum = 0.0;
@@ -738,8 +744,9 @@ struct Pipeline {
         return true;
     }
 
-    bool initCudaDecoder(std::string& error) {
-        int rc = 0;
+    bool initCudaDevice(std::string& error) {
+        if (cudaDevice) return true;
+
         if (externalCudaDevice) {
             cudaDevice = av_buffer_ref(externalCudaDevice);
             if (!cudaDevice) {
@@ -747,18 +754,25 @@ struct Pipeline {
                 return false;
             }
             logLine("resident FFmpeg CUDA device reused");
-        } else {
-            AVDictionary* deviceOpts = nullptr;
-            av_dict_set(&deviceOpts, "primary_ctx", "1", 0);
-            const std::string dev = std::to_string(args.device);
-            rc = av_hwdevice_ctx_create(
-                &cudaDevice, AV_HWDEVICE_TYPE_CUDA, dev.c_str(), deviceOpts, 0);
-            av_dict_free(&deviceOpts);
-            if (rc < 0) {
-                error = "av_hwdevice_ctx_create(CUDA): " + fferr(rc);
-                return false;
-            }
+            return true;
         }
+
+        AVDictionary* deviceOpts = nullptr;
+        av_dict_set(&deviceOpts, "primary_ctx", "1", 0);
+        const std::string dev = std::to_string(args.device);
+        const int rc = av_hwdevice_ctx_create(
+            &cudaDevice, AV_HWDEVICE_TYPE_CUDA, dev.c_str(), deviceOpts, 0);
+        av_dict_free(&deviceOpts);
+        if (rc < 0) {
+            error = "av_hwdevice_ctx_create(CUDA): " + fferr(rc);
+            return false;
+        }
+        return true;
+    }
+
+    bool initCudaDecoder(std::string& error) {
+        if (!initCudaDevice(error)) return false;
+        int rc = 0;
 
         const char* cuvidName = nullptr;
         switch (inVideo->codecpar->codec_id) {
@@ -836,15 +850,8 @@ struct Pipeline {
             const size_t cudnnVersion = cudnnGetVersionFn();
             {
                 std::ostringstream c;
-                c << "cuDNN version=" << cudnnVersion
-                  << " (requires >= 90700 for Blackwell CC 12.0)";
+                c << "cuDNN version=" << cudnnVersion;
                 logLine(c.str());
-            }
-            if (cudnnVersion < 90700) {
-                error = "cuDNN is too old for Blackwell CC 12.0: version=" +
-                        std::to_string(cudnnVersion);
-                FreeLibrary(cudnnModule);
-                return false;
             }
             FreeLibrary(cudnnModule);
 
@@ -855,6 +862,13 @@ struct Pipeline {
             cudaDeviceProp props{};
             if (cudaGetDeviceProperties(&props, args.device) != cudaSuccess) {
                 error = "cudaGetDeviceProperties failed";
+                return false;
+            }
+            // Apply the version safeguard only to CUDA compute capability 12.x,
+            // not to every CUDA-capable GPU.
+            if (props.major == 12 && cudnnVersion < 90700) {
+                error = "cuDNN is too old for CUDA compute capability 12.x: version=" +
+                        std::to_string(cudnnVersion) + " requires >=90700";
                 return false;
             }
             {
@@ -1305,8 +1319,19 @@ struct Pipeline {
         if (requestedStartTimestampUs > 0 && pts != AV_NOPTS_VALUE) {
             const int64_t frameUs = av_rescale_q(pts, inVideo->time_base, AV_TIME_BASE_Q);
             if (frameUs < requestedStartTimestampUs) {
+                if (!args.previewOnly && audioIndex >= 0 && outAudio) {
+                    AVFrame* anchor = av_frame_clone(frame);
+                    if (!anchor) {
+                        error = "av_frame_clone audio-tail seek anchor failed";
+                        return false;
+                    }
+                    preSeekVideoAnchor.reset(anchor);
+                }
                 return true;
             }
+        }
+        if (preSeekVideoAnchor && frame != preSeekVideoAnchor.get()) {
+            preSeekVideoAnchor.reset();
         }
         if (paceOrDrop(pts)) return true;
 
@@ -1810,14 +1835,63 @@ struct Pipeline {
         return true;
     }
 
-    void discardAudioAfterLastVideo() {
-        const size_t count = pendingAudioPackets.size();
-        for (AVPacket* packet : pendingAudioPackets) av_packet_free(&packet);
-        pendingAudioPackets.clear();
-        if (count > 0) {
-            logLine("discarded audio packets beyond final video PTS=" +
-                    std::to_string(count));
+    bool drainAudioAfterLastVideo(std::string& error) {
+        // The source audio track may continue after the final source video
+        // frame. Keep muxing those original audio packets normally. Do not
+        // pace network output, force interleave flushes, or manufacture a
+        // second video packet at media EOF; playback timing comes from PTS.
+        while (!pendingAudioPackets.empty()) {
+            AVPacket* packet = pendingAudioPackets.front();
+            pendingAudioPackets.pop_front();
+
+            const int64_t audioUs = audioPacketTimestampUs(packet);
+            if (firstVideoOutputUs != AV_NOPTS_VALUE &&
+                audioUs != AV_NOPTS_VALUE && audioUs < firstVideoOutputUs) {
+                av_packet_free(&packet);
+                continue;
+            }
+
+            const bool ok = writeAudioPacketNow(packet, error);
+            av_packet_free(&packet);
+            if (!ok) return false;
         }
+        return true;
+    }
+
+    bool hasPendingAudioAtOrAfterRequestedStart() const {
+        if (requestedStartTimestampUs <= 0 || !inAudio) return false;
+        for (const AVPacket* packet : pendingAudioPackets) {
+            const int64_t audioUs = audioPacketTimestampUs(packet);
+            if (audioUs != AV_NOPTS_VALUE &&
+                audioUs >= requestedStartTimestampUs) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool emitAudioTailSeekAnchor(std::string& error) {
+        if (videoOutputStarted || requestedStartTimestampUs <= 0 ||
+            !preSeekVideoAnchor || !hasPendingAudioAtOrAfterRequestedStart()) {
+            return true;
+        }
+
+        // The requested time is after the final source video frame but still
+        // inside the source audio track. Send the real final picture once at
+        // the requested timestamp so the client can initialize its video
+        // decoder. From here to EOF, send no more video; only original audio
+        // packets continue with their existing timestamps.
+        const int64_t anchorPts = av_rescale_q(
+            requestedStartTimestampUs, AV_TIME_BASE_Q, inVideo->time_base);
+        preSeekVideoAnchor->pts = anchorPts;
+        preSeekVideoAnchor->best_effort_timestamp = anchorPts;
+        logLine("audio-tail seek anchor startMs=" +
+                std::to_string(args.startMs));
+
+        AVFrame* anchor = preSeekVideoAnchor.get();
+        const bool ok = processFrame(anchor, error);
+        preSeekVideoAnchor.reset();
+        return ok;
     }
 
     bool drainDecoder(std::string& error) {
@@ -1901,6 +1975,7 @@ struct Pipeline {
             return false;
         }
         if (rc >= 0 && !drainDecoder(error)) return false;
+        if (!args.previewOnly && !emitAudioTailSeekAnchor(error)) return false;
         if (!args.previewOnly) {
             rc = avcodec_send_frame(enc, nullptr);
             if (rc < 0 && rc != AVERROR_EOF) {
@@ -1909,7 +1984,7 @@ struct Pipeline {
             }
             if (rc >= 0 && !writeEncodedPackets(error)) return false;
             if (!drainPendingAudio(error)) return false;
-            discardAudioAfterLastVideo();
+            if (!drainAudioAfterLastVideo(error)) return false;
             if (audioTranscode && !flushAudioTranscode(error)) return false;
             rc = av_write_trailer(outFmt);
             if (rc < 0) {
@@ -2165,9 +2240,10 @@ int main(int argc, char** argv) {
 
                 Pipeline warm;
                 warm.args = warmArgs;
-                // FFmpeg establishes the CUDA primary context before ORT.
+                // Startup readiness checks the CUDA device + RVM path only.
+                // Codec-specific decoder opening belongs to the actual stream.
                 if (!warm.initInput(error) ||
-                    !warm.initCudaDecoder(error) ||
+                    !warm.initCudaDevice(error) ||
                     !warm.initRvm(error)) {
                     return false;
                 }

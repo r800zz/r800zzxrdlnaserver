@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cctype>
 #include <cstdlib>
 #include <cerrno>
@@ -70,6 +71,15 @@ constexpr size_t kGenericTailProbeCacheMaxEntries = 16;
 
 std::mutex g_generic_tail_probe_cache_mutex;
 std::unordered_map<std::string, std::vector<char>> g_generic_tail_probe_cache;
+
+// The resident AI worker can execute only one RUN at a time.  Media players may
+// open a replacement GET before the previous GET has completely unwound.  Keep
+// that handoff ordered on the server side so a new RUN never races the previous
+// stream's pipe/cleanup path.
+std::mutex g_ai_stream_serial_mutex;
+std::mutex g_ai_stream_owner_mutex;
+SOCKET g_active_ai_stream_client = INVALID_SOCKET;
+std::atomic<uint64_t> g_ai_stream_generation{0};
 
 // The UI calls FindFiles() with the selected folder before Start(). Keep that
 // folder as the DLNA ContentDirectory root so Browse can expose real folders
@@ -184,6 +194,573 @@ std::string JsonEscape(std::string_view value) {
     return out;
 }
 
+
+std::string Pc2HmdHtml() {
+    static constexpr char kHtmlPart1[] = R"PC1(<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>R800ZZ DLNA Downloader</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; background:#111; color:#eee; }
+  main { max-width:980px; margin:0 auto; padding:24px; }
+  h1 { margin:0 0 10px; font-size:1.6rem; }
+  h1 a { color:inherit; }
+  .languages { display:flex; flex-wrap:wrap; gap:8px 14px; margin:0 0 12px; }
+  .intro { margin:0 0 6px; line-height:1.5; }
+  .intro-last { margin:0 0 20px; line-height:1.5; }
+  .languages label { display:inline-flex; align-items:center; gap:5px; white-space:nowrap; cursor:pointer; }
+  .languages input { width:auto; margin:0; padding:0; accent-color:auto; }
+  .server-row { display:grid; grid-template-columns:1fr auto; gap:10px; }
+  input { width:100%; padding:12px; border:1px solid #555; border-radius:8px; background:#1c1c1c; color:#fff; font-size:1rem; }
+  button { padding:11px 16px; border:1px solid #666; border-radius:8px; background:#2a2a2a; color:#fff; cursor:pointer; }
+  button:disabled { opacity:.55; cursor:default; }
+  #status { margin:14px 0; min-height:1.5em; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .toolbar { display:flex; gap:10px; flex-wrap:wrap; margin:12px 0 18px; }
+  .toolbar input { flex:1 1 260px; }
+  .file-list { display:grid; gap:8px; }
+  .file { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:10px; align-items:center; padding:12px; border:1px solid #333; border-radius:8px; background:#181818; }
+  .name { min-width:0; overflow-wrap:anywhere; }
+  .meta { margin-top:4px; color:#aaa; font-size:.82rem; }
+  .empty { color:#aaa; padding:18px 0; }
+  .note { margin-top:24px; color:#aaa; line-height:1.5; font-size:.9rem; }
+  progress { width:100%; height:18px; margin:12px 0; }
+  @media (max-width:700px) {
+    .server-row { grid-template-columns:1fr; }
+    .file { grid-template-columns:1fr 1fr; }
+    .name { grid-column:1 / -1; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Download from <a id="serverReadmeLink" href="https://github.com/r800zz/r800zzxrdlnaserver/blob/main/README.md" target="_blank" rel="noopener">r800zzXRdlnaServer for Windows</a></h1>
+
+  <div class="languages" id="languages">
+    <label><input type="radio" name="language" value="en"> English</label>
+    <label><input type="radio" name="language" value="ru"> Русский</label>
+    <label><input type="radio" name="language" value="es"> Español</label>
+    <label><input type="radio" name="language" value="th"> ภาษาไทย</label>
+    <label><input type="radio" name="language" value="cn"> 中文</label>
+    <label><input type="radio" name="language" value="kr"> 한국어</label>
+    <label><input type="radio" name="language" value="jp"> 日本語</label>
+  </div>
+
+  <p class="intro" id="downloadDescription"></p>
+  <p class="intro-last" id="serverOnlyDescription"></p>
+
+  <div class="server-row">
+    <input id="server" placeholder="http://192.168.1.102:49152" autocomplete="off" spellcheck="false">
+    <button id="load">Load File List</button>
+  </div>
+
+  <div id="status"></div>
+
+  <div class="toolbar">
+    <input id="filter" placeholder="Filter files..." autocomplete="off">
+    <button id="reload">Reload</button>
+  </div>
+
+  <progress id="progress" hidden></progress>
+  <div id="files" class="file-list"></div>
+
+  <div class="note">
+    <span id="apiLabel">API endpoint:</span> <code>/-_-9213--api/files</code><br>
+    <span id="serverHelp">Enter only the server base URL, for example</span> <code>http://192.168.1.102:49152</code>.
+  </div>
+</main>
+
+<script>
+var lass = "en";
+var langlang = "en";
+
+(() => {
+  "use strict";
+
+  const API_PATH = "/-_-9213--api/files";
+  const countryCodes = ["en", "ru", "es", "th", "cn", "kr", "jp"];
+  const languageCodes = {
+    en: "en",
+    ru: "ru",
+    es: "es",
+    th: "th",
+    cn: "zh",
+    kr: "ko",
+    jp: "ja"
+  };
+
+  const readmeBaseUrl = "https://github.com/r800zz/r800zzxrdlnaserver/blob/main/";
+
+  const text = {
+    en: {
+      downloadDescription: "Download files stored on your PC from the web browser of your VR HMD.",
+      serverOnlyDescription: "You need to enter the DLNA server URL. This is for r800zzXRdlnaServer only.",
+      load: "Load File List",
+      reload: "Reload",
+      filter: "Filter files...",
+      apiLabel: "API endpoint:",
+      serverHelp: "Enter only the server base URL, for example",
+      enterServer: "Enter the DLNA server URL.",
+      protocolError: "Only http:// or https:// is supported.",
+      noMatching: "No matching files.",
+      noFiles: "No files.",
+      unnamed: "(unnamed)",
+      parent: "Parent",
+      video: "Video",
+      download: "Download",
+      open: "Open",
+      loading: "Loading file list...",
+      invalidApi: "Invalid API response.",
+      files: "file(s)",
+      loadFailed: "Could not load the file list.",
+      downloading: "Downloading:",
+      saved: "Saved:",
+      downloadFailed: "JavaScript download failed.",
+      openingDirectly: "Opening the file URL directly..."
+    },
+    ru: {
+      downloadDescription: "Загружайте файлы, хранящиеся на вашем ПК, из веб-браузера VR-шлема.",
+      serverOnlyDescription: "Необходимо ввести URL DLNA-сервера. Это предназначено только для r800zzXRdlnaServer.",
+      load: "Загрузить список файлов",
+      reload: "Обновить",
+      filter: "Фильтр файлов...",
+      apiLabel: "API-адрес:",
+      serverHelp: "Введите только базовый URL сервера, например",
+      enterServer: "Введите URL DLNA-сервера.",
+      protocolError: "Поддерживаются только http:// и https://.",
+      noMatching: "Подходящие файлы не найдены.",
+      noFiles: "Файлов нет.",
+      unnamed: "(без имени)",
+      parent: "Родитель",
+      video: "Видео",
+      download: "Скачать",
+      open: "Открыть",
+      loading: "Загрузка списка файлов...",
+      invalidApi: "Некорректный ответ API.",
+      files: "файл(ов)",
+      loadFailed: "Не удалось загрузить список файлов.",
+      downloading: "Загрузка:",
+      saved: "Сохранено:",
+      downloadFailed: "Не удалось скачать файл с помощью JavaScript.",
+      openingDirectly: "Открывается прямой URL файла..."
+    },
+    es: {
+      downloadDescription: "Descarga archivos almacenados en tu PC desde el navegador web de tu visor VR.",
+      serverOnlyDescription: "Debes introducir la URL del servidor DLNA. Esto es exclusivamente para r800zzXRdlnaServer.",
+      load: "Cargar lista de archivos",
+      reload: "Recargar",
+)PC1";
+    static constexpr char kHtmlPart2[] = R"PC2(      filter: "Filtrar archivos...",
+      apiLabel: "Endpoint de API:",
+      serverHelp: "Introduce solo la URL base del servidor, por ejemplo",
+      enterServer: "Introduce la URL del servidor DLNA.",
+      protocolError: "Solo se admite http:// o https://.",
+      noMatching: "No hay archivos coincidentes.",
+      noFiles: "No hay archivos.",
+      unnamed: "(sin nombre)",
+      parent: "Superior",
+      video: "Vídeo",
+      download: "Descargar",
+      open: "Abrir",
+      loading: "Cargando lista de archivos...",
+      invalidApi: "Respuesta de API no válida.",
+      files: "archivo(s)",
+      loadFailed: "No se pudo cargar la lista de archivos.",
+      downloading: "Descargando:",
+      saved: "Guardado:",
+      downloadFailed: "La descarga con JavaScript ha fallado.",
+      openingDirectly: "Abriendo directamente la URL del archivo..."
+    },
+    th: {
+      downloadDescription: "ดาวน์โหลดไฟล์ที่เก็บไว้ในพีซีของคุณจากเว็บเบราว์เซอร์ของ VR HMD",
+      serverOnlyDescription: "คุณต้องป้อน URL ของเซิร์ฟเวอร์ DLNA เครื่องมือนี้ใช้สำหรับ r800zzXRdlnaServer เท่านั้น",
+      load: "โหลดรายการไฟล์",
+      reload: "โหลดใหม่",
+      filter: "กรองไฟล์...",
+      apiLabel: "ตำแหน่ง API:",
+      serverHelp: "ป้อนเฉพาะ URL หลักของเซิร์ฟเวอร์ ตัวอย่างเช่น",
+      enterServer: "ป้อน URL ของเซิร์ฟเวอร์ DLNA",
+      protocolError: "รองรับเฉพาะ http:// หรือ https:// เท่านั้น",
+      noMatching: "ไม่พบไฟล์ที่ตรงกัน",
+      noFiles: "ไม่มีไฟล์",
+      unnamed: "(ไม่มีชื่อ)",
+      parent: "โฟลเดอร์แม่",
+      video: "วิดีโอ",
+      download: "ดาวน์โหลด",
+      open: "เปิด",
+      loading: "กำลังโหลดรายการไฟล์...",
+      invalidApi: "การตอบกลับจาก API ไม่ถูกต้อง",
+      files: "ไฟล์",
+      loadFailed: "ไม่สามารถโหลดรายการไฟล์ได้",
+      downloading: "กำลังดาวน์โหลด:",
+      saved: "บันทึกแล้ว:",
+      downloadFailed: "การดาวน์โหลดด้วย JavaScript ล้มเหลว",
+      openingDirectly: "กำลังเปิด URL ของไฟล์โดยตรง..."
+    },
+    cn: {
+      downloadDescription: "从 VR HMD 的网页浏览器下载存储在电脑上的文件。",
+      serverOnlyDescription: "需要输入 DLNA 服务器 URL。本工具仅适用于 r800zzXRdlnaServer。",
+      load: "加载文件列表",
+      reload: "重新加载",
+      filter: "筛选文件...",
+      apiLabel: "API 地址：",
+      serverHelp: "只需输入服务器的基础 URL，例如",
+      enterServer: "请输入 DLNA 服务器 URL。",
+      protocolError: "仅支持 http:// 或 https://。",
+      noMatching: "没有匹配的文件。",
+      noFiles: "没有文件。",
+      unnamed: "（未命名）",
+      parent: "父目录",
+      video: "视频",
+      download: "下载",
+      open: "打开",
+      loading: "正在加载文件列表...",
+      invalidApi: "API 响应无效。",
+      files: "个文件",
+      loadFailed: "无法加载文件列表。",
+      downloading: "正在下载：",
+      saved: "已保存：",
+      downloadFailed: "JavaScript 下载失败。",
+      openingDirectly: "正在直接打开文件 URL..."
+    },
+    kr: {
+      downloadDescription: "VR HMD의 웹 브라우저에서 PC에 저장된 파일을 다운로드합니다.",
+      serverOnlyDescription: "DLNA 서버 URL을 입력해야 합니다. 이 도구는 r800zzXRdlnaServer 전용입니다.",
+      load: "파일 목록 불러오기",
+      reload: "다시 불러오기",
+      filter: "파일 필터...",
+      apiLabel: "API 엔드포인트:",
+      serverHelp: "서버 기본 URL만 입력하십시오. 예:",
+      enterServer: "DLNA 서버 URL을 입력하십시오.",
+      protocolError: "http:// 또는 https://만 지원됩니다.",
+      noMatching: "일치하는 파일이 없습니다.",
+      noFiles: "파일이 없습니다.",
+      unnamed: "(이름 없음)",
+      parent: "상위",
+      video: "비디오",
+      download: "다운로드",
+      open: "열기",
+      loading: "파일 목록을 불러오는 중...",
+      invalidApi: "잘못된 API 응답입니다.",
+      files: "개 파일",
+      loadFailed: "파일 목록을 불러오지 못했습니다.",
+      downloading: "다운로드 중:",
+      saved: "저장됨:",
+      downloadFailed: "JavaScript 다운로드에 실패했습니다.",
+      openingDirectly: "파일 URL을 직접 엽니다..."
+    },
+    jp: {
+      downloadDescription: "パソコン上にあるファイルをVR HMDのウェブブラウザからダウンロードします。",
+      serverOnlyDescription: "DLNAサーバーURLを入力する必要があります。r800zzXRdlnaServer 専用です。",
+      load: "ファイル一覧を読み込む",
+      reload: "再読み込み",
+      filter: "ファイルを絞り込む...",
+      apiLabel: "APIエンドポイント:",
+      serverHelp: "サーバーのベースURLだけを入力してください。例:",
+      enterServer: "DLNAサーバーのURLを入力してください。",
+      protocolError: "http:// または https:// のみ対応しています。",
+      noMatching: "一致するファイルがありません。",
+      noFiles: "ファイルがありません。",
+      unnamed: "（名前なし）",
+      parent: "親",
+      video: "動画",
+      download: "ダウンロード",
+      open: "開く",
+      loading: "ファイル一覧を読み込んでいます...",
+      invalidApi: "APIの応答が不正です。",
+      files: "ファイル",
+      loadFailed: "ファイル一覧を読み込めませんでした。",
+      downloading: "ダウンロード中:",
+      saved: "保存しました:",
+      downloadFailed: "JavaScriptでのダウンロードに失敗しました。",
+      openingDirectly: "ファイルURLを直接開きます..."
+    }
+  };
+
+  const serverInput = document.getElementById("server");
+  const loadButton = document.getElementById("load");
+  const reloadButton = document.getElementById("reload");
+  const filterInput = document.getElementById("filter");
+  const filesElement = document.getElementById("files");
+  const statusElement = document.getElementById("status");
+  const progress = document.getElementById("progress");
+)PC2";
+    static constexpr char kHtmlPart3[] = R"PC3(  const apiLabel = document.getElementById("apiLabel");
+  const serverHelp = document.getElementById("serverHelp");
+  const serverReadmeLink = document.getElementById("serverReadmeLink");
+  const downloadDescription = document.getElementById("downloadDescription");
+  const serverOnlyDescription = document.getElementById("serverOnlyDescription");
+  const languageRadios = document.querySelectorAll('input[name="language"]');
+
+  let currentFiles = [];
+
+  function t(key) {
+    return (text[lass] && text[lass][key]) || text.en[key] || key;
+  }
+
+  function initializeLanguage() {
+    const params = new URLSearchParams(window.location.search);
+    const requested = (params.get("l") || "en").toLowerCase();
+    lass = countryCodes.includes(requested) ? requested : "en";
+    langlang = languageCodes[lass];
+    document.documentElement.lang = langlang;
+    for (const radio of languageRadios) radio.checked = radio.value === lass;
+  }
+
+  function setLanguage(code, updateUrl) {
+    lass = countryCodes.includes(code) ? code : "en";
+    langlang = languageCodes[lass];
+    document.documentElement.lang = langlang;
+    for (const radio of languageRadios) radio.checked = radio.value === lass;
+
+    if (updateUrl) {
+      const url = new URL(window.location.href);
+      url.searchParams.set("l", lass);
+      history.replaceState(null, "", url);
+    }
+
+    applyLanguage();
+    renderFiles();
+  }
+
+  function applyLanguage() {
+    loadButton.textContent = t("load");
+    reloadButton.textContent = t("reload");
+    filterInput.placeholder = t("filter");
+    apiLabel.textContent = t("apiLabel");
+    serverHelp.textContent = t("serverHelp");
+    downloadDescription.textContent = t("downloadDescription");
+    serverOnlyDescription.textContent = t("serverOnlyDescription");
+    serverReadmeLink.href = readmeBaseUrl + (lass === "en" ? "README.md" : "README_" + langlang + ".md");
+  }
+
+  const savedServer = localStorage.getItem("r800zz_dlna_server");
+  if (savedServer) {
+    serverInput.value = savedServer;
+  } else if (window.location.protocol === "http:" || window.location.protocol === "https:") {
+    serverInput.value = window.location.origin;
+  }
+
+  function setStatus(value) { statusElement.textContent = value; }
+
+  function normalizeServer(value) {
+    value = value.trim();
+    if (!value) throw new Error(t("enterServer"));
+    if (!/^https?:\/\//i.test(value)) value = "http://" + value;
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(t("protocolError"));
+    return url.origin;
+  }
+
+  function humanSize(bytes) {
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n < 0) return "";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let value = n, unit = 0;
+    while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+    return (unit === 0 ? value.toFixed(0) : value.toFixed(1)) + " " + units[unit];
+  }
+
+  function safeName(name) {
+    return String(name || "download").replace(/[\\/:*?"<>|]/g, "_");
+  }
+
+  function resolveFileUrl(server, value) {
+    return new URL(String(value || ""), server + "/").toString();
+  }
+
+  function renderFiles() {
+    let server;
+    try { server = normalizeServer(serverInput.value); }
+    catch (_) { server = ""; }
+
+    const q = filterInput.value.trim().toLowerCase();
+    const list = currentFiles.filter(item => !q || String(item.name || "").toLowerCase().includes(q));
+    filesElement.textContent = "";
+
+    if (!list.length) {
+      const div = document.createElement("div");
+      div.className = "empty";
+      div.textContent = currentFiles.length ? t("noMatching") : t("noFiles");
+      filesElement.appendChild(div);
+      return;
+    }
+
+    for (const item of list) {
+      const row = document.createElement("div");
+      row.className = "file";
+
+      const info = document.createElement("div");
+      info.className = "name";
+
+      const title = document.createElement("div");
+      title.textContent = item.name || t("unnamed");
+      info.appendChild(title);
+
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const parts = [];
+      if (item.size !== undefined) parts.push(humanSize(item.size));
+      if (item.id !== undefined) parts.push("ID " + item.id);
+      if (item.parentId !== undefined) parts.push(t("parent") + " " + item.parentId);
+      if (item.isVideo === true) parts.push(t("video"));
+      meta.textContent = parts.join("  |  ");
+      info.appendChild(meta);
+
+      const downloadButton = document.createElement("button");
+      downloadButton.textContent = t("download");
+      downloadButton.addEventListener("click", () => downloadFile(item, server, downloadButton));
+
+      const openButton = document.createElement("button");
+      openButton.textContent = t("open");
+      openButton.addEventListener("click", () => {
+        try { window.open(resolveFileUrl(server, item.url), "_blank", "noopener"); }
+        catch (e) { setStatus(e.message || String(e)); }
+      });
+
+      row.appendChild(info);
+      row.appendChild(downloadButton);
+      row.appendChild(openButton);
+      filesElement.appendChild(row);
+    }
+  }
+
+  async function loadFiles() {
+    progress.hidden = true;
+    setStatus("");
+    filesElement.textContent = "";
+
+    try {
+      const server = normalizeServer(serverInput.value);
+      serverInput.value = server;
+      localStorage.setItem("r800zz_dlna_server", server);
+
+      loadButton.disabled = true;
+      reloadButton.disabled = true;
+      setStatus(t("loading"));
+
+      const response = await fetch(server + API_PATH, { method:"GET", mode:"cors", cache:"no-store" });
+      if (!response.ok) throw new Error("HTTP " + response.status + " " + response.statusText);
+
+      const data = await response.json();
+      if (!Array.isArray(data)) throw new Error(t("invalidApi"));
+
+      currentFiles = data;
+      renderFiles();
+      setStatus(currentFiles.length + " " + t("files"));
+    } catch (e) {
+      currentFiles = [];
+      renderFiles();
+      setStatus(t("loadFailed") + "\n" + (e && e.message ? e.message : String(e)));
+    } finally {
+      loadButton.disabled = false;
+      reloadButton.disabled = false;
+    }
+  }
+
+  async function downloadFile(item, server, button) {
+    let url;
+    try { url = resolveFileUrl(server, item.downloadUrl || item.url); }
+    catch (e) { setStatus(e.message || String(e)); return; }
+
+    const filename = safeName(item.name || "download");
+    button.disabled = true;
+    progress.hidden = true;
+
+    try {
+      setStatus(t("downloading") + " " + filename);
+      const response = await fetch(url, { method:"GET", mode:"cors", cache:"no-store" });
+      if (!response.ok) throw new Error("HTTP " + response.status + " " + response.statusText);
+
+      const total = Number(response.headers.get("Content-Length")) || 0;
+      const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+
+      if (!reader) {
+        const blob = await response.blob();
+)PC3";
+    static constexpr char kHtmlPart4[] = R"PC4(        saveBlob(blob, filename);
+        setStatus(t("saved") + " " + filename);
+        return;
+      }
+
+      const chunks = [];
+      let received = 0;
+      progress.hidden = false;
+      if (total > 0) { progress.max = total; progress.value = 0; }
+      else { progress.removeAttribute("value"); }
+
+      while (true) {
+        const result = await reader.read();
+        if (result.done) break;
+        chunks.push(result.value);
+        received += result.value.byteLength;
+        if (total > 0) {
+          progress.value = received;
+          setStatus(t("downloading") + " " + filename + "  " + Math.floor(received * 100 / total) + "%");
+        } else {
+          setStatus(t("downloading") + " " + filename + "  " + (received / 1024 / 1024).toFixed(1) + " MB");
+        }
+      }
+
+      const contentType = response.headers.get("Content-Type") || "application/octet-stream";
+      saveBlob(new Blob(chunks, { type:contentType }), filename);
+      progress.hidden = true;
+      setStatus(t("saved") + " " + filename);
+    } catch (e) {
+      progress.hidden = true;
+      setStatus(t("downloadFailed") + "\n" + (e && e.message ? e.message : String(e)) + "\n" + t("openingDirectly"));
+      window.open(url, "_blank", "noopener");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function saveBlob(blob, filename) {
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objectUrl;
+    a.download = filename;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
+  }
+
+  initializeLanguage();
+  applyLanguage();
+  renderFiles();
+  if (serverInput.value) {
+    loadFiles();
+  }
+
+  for (const radio of languageRadios) {
+    radio.addEventListener("change", () => {
+      if (radio.checked) setLanguage(radio.value, true);
+    });
+  }
+
+  loadButton.addEventListener("click", loadFiles);
+  reloadButton.addEventListener("click", loadFiles);
+  filterInput.addEventListener("input", renderFiles);
+  serverInput.addEventListener("keydown", e => { if (e.key === "Enter") loadFiles(); });
+})();
+</script>
+</body>
+</html>
+)PC4";
+    std::string html;
+    html.reserve((sizeof(kHtmlPart1) - 1) + (sizeof(kHtmlPart2) - 1) + (sizeof(kHtmlPart3) - 1) + (sizeof(kHtmlPart4) - 1));
+    html.append(kHtmlPart1, sizeof(kHtmlPart1) - 1);
+    html.append(kHtmlPart2, sizeof(kHtmlPart2) - 1);
+    html.append(kHtmlPart3, sizeof(kHtmlPart3) - 1);
+    html.append(kHtmlPart4, sizeof(kHtmlPart4) - 1);
+    return html;
+}
+
 std::string WideToUtf8(const std::wstring& value) {
     if (value.empty()) return {};
     const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
@@ -244,6 +821,38 @@ std::string UrlEncodePathSegment(std::string_view value) {
     return result;
 }
 
+std::string SourceMimeTypeForPath(const std::filesystem::path& path) {
+    const std::string ext = ToLower(path.extension().string());
+    if (ext == ".mp4" || ext == ".m4v") return "video/mp4";
+    if (ext == ".webm") return "video/webm";
+    if (ext == ".mkv") return "video/x-matroska";
+    if (ext == ".avi") return "video/x-msvideo";
+    if (ext == ".mov") return "video/quicktime";
+    if (ext == ".ts" || ext == ".m2ts") return "video/mp2t";
+    if (ext == ".vrm" || ext == ".glb") return "model/gltf-binary";
+    if (ext == ".gltf") return "model/gltf+json";
+    if (ext == ".json") return "application/json";
+    if (ext == ".png") return "image/png";
+    if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
+    if (ext == ".webp") return "image/webp";
+    return "application/octet-stream";
+}
+
+std::string DownloadContentDisposition(std::string_view utf8Filename) {
+    std::string fallback;
+    fallback.reserve(utf8Filename.size());
+    for (unsigned char c : utf8Filename) {
+        if (c >= 0x20 && c < 0x7f && c != '"' && c != '\\' && c != ';') {
+            fallback.push_back(static_cast<char>(c));
+        } else if (c >= 0x20) {
+            fallback.push_back('_');
+        }
+    }
+    if (fallback.empty()) fallback = "download";
+    return "attachment; filename=\"" + fallback +
+           "\"; filename*=UTF-8''" + UrlEncodePathSegment(utf8Filename);
+}
+
 size_t ParseSizeValue(const std::string& value, size_t fallback) {
     if (value.empty()) return fallback;
     try {
@@ -263,6 +872,37 @@ std::string AiBackendArgument(AiBackend backend) {
     if (backend == AiBackend::DirectML) return "dml";
     if (backend == AiBackend::Cpu) return "cpu";
     return "cuda";
+}
+
+std::string DisplayCodecName(std::string codec) {
+    codec = ToLower(std::move(codec));
+    if (codec == "h264") return "H.264";
+    if (codec == "hevc" || codec == "h265") return "HEVC";
+    if (codec == "vp9") return "VP9";
+    if (codec == "vp8") return "VP8";
+    if (codec == "av1") return "AV1";
+    if (codec == "mpeg4") return "MPEG-4";
+    return codec.empty() ? "unknown" : codec;
+}
+
+std::string AiOutputModeDisplayName(AiOutputMode mode) {
+    if (mode == AiOutputMode::WebmVp9Alpha) return "Alpha WebM VP9";
+    if (mode == AiOutputMode::ChromaKeyHevc) return "Chroma Key";
+    return "Alpha Packed";
+}
+
+std::string AiBackendDisplayName(AiBackend backend, int directmlDevice) {
+    if (backend == AiBackend::DirectML) {
+        return "DirectML device " + std::to_string(directmlDevice);
+    }
+    if (backend == AiBackend::Cpu) return "CPU";
+    return "NVIDIA CUDA";
+}
+
+bool ShouldShowWorkerLog(const std::string& line) {
+    // Periodic realtime statistics are useful for profiling but make real errors
+    // disappear from the visible log. Keep them out of the normal UI log.
+    return line.find("realtime fpsOut=") == std::string::npos;
 }
 
 std::string MakeUuid() {
@@ -704,7 +1344,20 @@ struct DlnaServer::ResidentAiState {
     int width{0};
     int height{0};
     std::atomic<bool> ready{false};
+    // PREPARE can fail while the resident controller itself remains alive.
+    // Publish that terminal result so Start() does not sit in the 60 s READY wait.
+    std::atomic<bool> prepare_failed{false};
     std::atomic<uint64_t> request_sequence{0};
+
+    // HTTP streaming code keeps a raw pointer to this state while it waits on
+    // the named pipe.  Keep the state alive until every such user has left.
+    // This closes the race where Stop()/Start() could destroy ResidentAiState
+    // while a detached HTTP worker was still using control_mutex/stdin_write.
+    std::atomic<uint32_t> active_http_users{0};
+    std::atomic<bool> stopping{false};
+    std::mutex http_users_mutex;
+    std::condition_variable http_users_cv;
+
     std::mutex control_mutex;
 };
 
@@ -869,14 +1522,16 @@ bool DlnaServer::StartResidentAiWorker(const std::filesystem::path& media_file) 
         return false;
     }
     ec.clear();
-    if (!std::filesystem::is_regular_file(cudaModel, ec)) {
-        AddLog("AI prewarm error: CUDA model was not found: " + WideToUtf8(cudaModel.wstring()));
-        return false;
-    }
-    ec.clear();
-    if (!std::filesystem::is_regular_file(dmlModel, ec)) {
-        AddLog("AI prewarm error: DirectML/CPU model was not found: " + WideToUtf8(dmlModel.wstring()));
-        return false;
+    if (ai_backend_ == AiBackend::NvidiaCuda) {
+        if (!std::filesystem::is_regular_file(cudaModel, ec)) {
+            AddLog("AI prewarm error: CUDA model was not found: " + WideToUtf8(cudaModel.wstring()));
+            return false;
+        }
+    } else {
+        if (!std::filesystem::is_regular_file(dmlModel, ec)) {
+            AddLog("AI prewarm error: DirectML/CPU model was not found: " + WideToUtf8(dmlModel.wstring()));
+            return false;
+        }
     }
     ec.clear();
     if (!std::filesystem::is_regular_file(media_file, ec)) {
@@ -977,6 +1632,9 @@ bool DlnaServer::StartResidentAiWorker(const std::filesystem::path& media_file) 
     state->stderr_thread = std::thread([this, raw]() {
         std::array<char, 4096> data{};
         std::string pending;
+        std::string errorGpu;
+        std::string errorMode;
+        std::string errorCodec;
         DWORD got = 0;
         while (ReadFile(raw->stderr_read, data.data(),
                         static_cast<DWORD>(data.size()), &got, nullptr) && got > 0) {
@@ -987,14 +1645,35 @@ bool DlnaServer::StartResidentAiWorker(const std::filesystem::path& media_file) 
                 if (!line.empty() && line.back() == '\r') line.pop_back();
                 const std::string clean = SanitizeWorkerLog(line);
                 if (clean.find("RESIDENT_READY") != std::string::npos) {
+                    raw->prepare_failed.store(false);
                     raw->ready.store(true);
                 }
-                if (!clean.empty()) AddLog("GPU: " + clean);
+                if (clean.find("RESIDENT_ERROR prepare backend=") != std::string::npos) {
+                    raw->ready.store(false);
+                    raw->prepare_failed.store(true);
+                }
+                if (!clean.empty()) {
+                    HandleWorkerDiagnosticLine(
+                        clean, errorGpu, errorMode, errorCodec);
+                    if (ShouldShowWorkerLog(clean)) AddLog("GPU: " + clean);
+                }
                 pending.erase(0, pos + 1);
             }
         }
         pending = SanitizeWorkerLog(pending);
-        if (!pending.empty()) AddLog("GPU: " + pending);
+        if (!pending.empty()) {
+            if (pending.find("RESIDENT_READY") != std::string::npos) {
+                raw->prepare_failed.store(false);
+                raw->ready.store(true);
+            }
+            if (pending.find("RESIDENT_ERROR prepare backend=") != std::string::npos) {
+                raw->ready.store(false);
+                raw->prepare_failed.store(true);
+            }
+            HandleWorkerDiagnosticLine(
+                pending, errorGpu, errorMode, errorCodec);
+            if (ShouldShowWorkerLog(pending)) AddLog("GPU: " + pending);
+        }
         raw->ready.store(false);
     });
 
@@ -1010,9 +1689,22 @@ void DlnaServer::StopResidentAiWorker() {
     std::unique_ptr<ResidentAiState> state;
     {
         std::lock_guard<std::mutex> lock(resident_ai_mutex_);
+        if (resident_ai_) {
+            // Prevent new HTTP users from borrowing this state before removing
+            // it from resident_ai_. Existing users hold an active_http_users
+            // reference until their resident streaming path is finished.
+            resident_ai_->stopping.store(true, std::memory_order_release);
+        }
         state = std::move(resident_ai_);
     }
     if (!state) return;
+
+    {
+        std::unique_lock<std::mutex> usersLock(state->http_users_mutex);
+        state->http_users_cv.wait(usersLock, [&state]() {
+            return state->active_http_users.load(std::memory_order_acquire) == 0;
+        });
+    }
 
     if (state->stdin_write) {
         std::lock_guard<std::mutex> controlLock(state->control_mutex);
@@ -1098,6 +1790,7 @@ bool DlnaServer::SetAiPrewarm(bool enabled, const std::filesystem::path& media_f
     resident_ai_->input = media_file;
     resident_ai_->backend = ai_backend;
     resident_ai_->directml_device = directml_device;
+    resident_ai_->prepare_failed.store(false);
     resident_ai_->ready.store(false);
     int64_t ignoredDuration = 0;
     ProbeMedia(media_file, ignoredDuration,
@@ -1403,50 +2096,195 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
     }
 
     advertised_ip_ = advertised_ip;
-    ai_passthrough_ = ai_passthrough;
-    ai_output_mode_ = ai_output_mode;
+    ai_passthrough_.store(ai_passthrough, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(ai_mode_mutex_);
+        selected_ai_passthrough_ = ai_passthrough;
+        ai_passthrough_change_pending_ = false;
+        ai_output_mode_ = ai_output_mode;
+        active_ai_output_mode_ = ai_output_mode;
+        ai_output_mode_change_pending_ = false;
+        active_ai_media_id_ = 0;
+    }
     ai_backend_ = ai_backend;
     directml_device_ = directml_device;
     video_files_only_ = video_files_only;
 
-    // CUDA/DirectML/CPU use the same resident/prewarm lifecycle.
-    // Non-video files are always served raw, even when AI Passthrough is ON.
+    // CUDA/DirectML/CPU initialization starts only when the user starts the
+    // DLNA server.  If AI Passthrough was requested, do not report Running
+    // until the selected backend/RVM worker is actually ready.
     const auto firstVideo = std::find_if(
         media_items_.begin(), media_items_.end(),
         [](const MediaItem& item) { return item.is_video; });
-    if (ai_passthrough_ && firstVideo != media_items_.end()) {
-        SetAiPrewarm(true, firstVideo->path, ai_backend_, directml_device_);
+    if (ai_passthrough_.load(std::memory_order_relaxed) &&
+        firstVideo != media_items_.end()) {
+        SetStatus("Starting AI Passthrough...");
+        AddLog("AI Passthrough startup: initializing backend=" +
+               AiBackendArgument(ai_backend_) + ".");
+
+        bool backendReady = false;
+        std::string startupFailure;
+
+        // A resident controller can stay alive after PREPARE itself failed.
+        // Try the selected backend once more from a completely new worker, but
+        // never keep waiting for READY after a terminal PREPARE error.
+        for (int attempt = 0; attempt < 2 && !backendReady; ++attempt) {
+            startupFailure.clear();
+            bool retryableFailure = false;
+
+            if (!SetAiPrewarm(true, firstVideo->path,
+                              ai_backend_, directml_device_)) {
+                startupFailure =
+                    "AI Passthrough startup failed before backend preparation.";
+                retryableFailure = true;
+            } else {
+                const auto startupDeadline =
+                    std::chrono::steady_clock::now() + std::chrono::seconds(60);
+
+                for (;;) {
+                    if (IsAiPrewarmReady()) {
+                        backendReady = true;
+                        break;
+                    }
+
+                    bool workerAlive = false;
+                    bool prepareFailed = false;
+                    DWORD workerExitCode = STILL_ACTIVE;
+                    {
+                        std::lock_guard<std::mutex> lock(resident_ai_mutex_);
+                        if (resident_ai_) {
+                            prepareFailed =
+                                resident_ai_->prepare_failed.load();
+                            if (resident_ai_->process) {
+                                workerAlive =
+                                    GetExitCodeProcess(
+                                        resident_ai_->process,
+                                        &workerExitCode) &&
+                                    workerExitCode == STILL_ACTIVE;
+                            }
+                        }
+                    }
+
+                    if (prepareFailed) {
+                        startupFailure =
+                            "AI Passthrough startup failed: worker reported "
+                            "backend preparation failure.";
+                        retryableFailure = true;
+                        break;
+                    }
+
+                    if (!workerAlive) {
+                        startupFailure =
+                            "AI Passthrough startup failed: worker exited before ready"
+                            " (exit=" + std::to_string(workerExitCode) + ").";
+                        retryableFailure = true;
+                        break;
+                    }
+
+                    if (std::chrono::steady_clock::now() >= startupDeadline) {
+                        startupFailure =
+                            "AI Passthrough startup failed: backend initialization "
+                            "timed out after 60 seconds.";
+                        break;
+                    }
+                    Sleep(20);
+                }
+            }
+
+            if (!backendReady) {
+                StopResidentAiWorker();
+                if (attempt == 0 && retryableFailure) {
+                    AddLog(startupFailure +
+                           " Retrying selected backend once with a new worker.");
+                } else {
+                    break;
+                }
+            }
+        }
+
+        if (!backendReady) {
+            SetStatus("AI Passthrough startup failed.");
+            AddLog(startupFailure);
+            return false;
+        }
+
+        AddLog("AI Passthrough startup: backend ready.");
     } else {
         SetAiPrewarm(false, {}, ai_backend_, directml_device_);
     }
     uuid_ = MakeUuid();
 
     if (!SetupHttpListener()) {
+        StopResidentAiWorker();
         SetStatus("Could not open an HTTP port.");
         return false;
     }
     if (!SetupSsdpSocket()) {
         closesocket(http_listen_socket_);
         http_listen_socket_ = INVALID_SOCKET;
+        StopResidentAiWorker();
         SetStatus("Could not open SSDP port 1900. Check firewall/network settings.");
         return false;
     }
 
     running_ = true;
     SetStatus("Running");
-    AddLog("Build: DeoVR_Search_NoEraseRedraw_SkyBlueUI_TitleLinks");
     AddLog("DLNA server started: http://" + advertised_ip_ + ":" +
            std::to_string(http_port_) + "/media/<id>");
     AddLog(std::string(video_files_only_ ? "Video files: " : "Shared files: ") +
            std::to_string(media_items_.size()));
     AddLog("DLNA folders: " + std::to_string(directory_items_.size()));
-    AddLog(std::string("AI Passthrough: ") + (ai_passthrough_ ? "ON" : "OFF"));
-    if (ai_passthrough_) AddLog("AI Output: " + AiOutputLabel());
+    AddLog(std::string("AI Passthrough: ") +
+           (ai_passthrough_.load(std::memory_order_relaxed) ? "ON" : "OFF"));
+    if (ai_passthrough_.load(std::memory_order_relaxed)) {
+        AddLog("AI Output: " + AiOutputLabel());
+    }
 
     http_thread_ = std::thread(&DlnaServer::HttpLoop, this);
     ssdp_thread_ = std::thread(&DlnaServer::SsdpLoop, this);
     SendAliveNotifications();
     return true;
+}
+
+void DlnaServer::SetAiPassthroughMode(bool enabled, AiOutputMode mode) {
+    bool pending = false;
+    {
+        std::lock_guard<std::mutex> lock(ai_mode_mutex_);
+        selected_ai_passthrough_ = enabled;
+        ai_output_mode_ = mode;
+
+        if (!running_.load()) {
+            ai_passthrough_.store(enabled, std::memory_order_relaxed);
+            active_ai_output_mode_ = mode;
+            ai_passthrough_change_pending_ = false;
+            ai_output_mode_change_pending_ = false;
+        } else {
+            ai_passthrough_change_pending_ =
+                enabled != ai_passthrough_.load(std::memory_order_relaxed);
+            ai_output_mode_change_pending_ =
+                enabled && mode != active_ai_output_mode_;
+        }
+        pending = ai_passthrough_change_pending_ ||
+                  ai_output_mode_change_pending_;
+    }
+
+    if (!enabled) {
+        AddLog(std::string("AI Passthrough ") +
+               (pending ? "pending: OFF" : "selected: OFF"));
+    } else {
+        AddLog(std::string("AI Passthrough ") +
+               (pending ? "pending: ON, " : "selected: ON, ") +
+               AiOutputModeDisplayName(mode));
+    }
+}
+
+void DlnaServer::SetAiOutputMode(AiOutputMode mode) {
+    bool enabled = true;
+    {
+        std::lock_guard<std::mutex> lock(ai_mode_mutex_);
+        enabled = selected_ai_passthrough_;
+    }
+    SetAiPassthroughMode(enabled, mode);
 }
 
 void DlnaServer::Stop() {
@@ -1492,6 +2330,20 @@ void DlnaServer::Stop() {
         SetStatus("Stopped");
         AddLog("DLNA server stopped.");
     }
+
+    // The AI worker belongs to the running DLNA server.  Do not leave a
+    // prepared/failed GPU state alive after Stop(); the next Start() must retry
+    // initialization from a clean state.
+    StopResidentAiWorker();
+    {
+        std::lock_guard<std::mutex> lock(ai_mode_mutex_);
+        active_ai_media_id_ = 0;
+        ai_passthrough_.store(selected_ai_passthrough_,
+                              std::memory_order_relaxed);
+        active_ai_output_mode_ = ai_output_mode_;
+        ai_passthrough_change_pending_ = false;
+        ai_output_mode_change_pending_ = false;
+    }
 }
 
 std::string DlnaServer::AdvertisedIp() const {
@@ -1525,6 +2377,128 @@ void DlnaServer::RecordAiCapabilityResult(const AiCapabilityResult& result) {
     AddLog(std::string("AI capability: ") +
            (result.available ? "AVAILABLE - " : "UNAVAILABLE - ") +
            result.message);
+}
+
+void DlnaServer::SetAiErrorCallback(
+        std::function<void(const AiErrorInfo&)> callback) {
+    std::lock_guard<std::mutex> lock(ai_error_callback_mutex_);
+    ai_error_callback_ = std::move(callback);
+}
+
+void DlnaServer::ReportAiError(const std::string& severity,
+                               const std::string& gpu,
+                               const std::string& mode,
+                               const std::string& codec,
+                               const std::string& message) {
+    AiErrorInfo info;
+    info.severity = severity.empty() ? "ERROR" : severity;
+    info.gpu = gpu.empty() ? "unknown" : gpu;
+    info.mode = mode.empty() ? "unknown" : mode;
+    info.codec = codec.empty() ? "unknown" : codec;
+    info.message = message;
+
+    std::function<void(const AiErrorInfo&)> callback;
+    {
+        std::lock_guard<std::mutex> lock(ai_error_callback_mutex_);
+        callback = ai_error_callback_;
+    }
+    if (callback) callback(info);
+}
+
+void DlnaServer::HandleWorkerDiagnosticLine(const std::string& line,
+                                            std::string& gpu,
+                                            std::string& mode,
+                                            std::string& codec) {
+    // Event-driven only: this runs only when the worker writes a stderr line.
+    // There is no timer, polling, log-history scan, or video-frame-path check.
+    constexpr std::string_view decoderKey = "decoder selected name=";
+    if (const size_t pos = line.find(decoderKey); pos != std::string::npos) {
+        const size_t begin = pos + decoderKey.size();
+        size_t end = line.find_first_of(" \t\r\n", begin);
+        if (end == std::string::npos) end = line.size();
+        codec = DisplayCodecName(line.substr(begin, end - begin));
+    }
+
+    if (line.find("RVM backend=DirectML") != std::string::npos) {
+        constexpr std::string_view nameKey = "name=\"";
+        if (const size_t pos = line.find(nameKey); pos != std::string::npos) {
+            const size_t begin = pos + nameKey.size();
+            const size_t end = line.find('\"', begin);
+            if (end != std::string::npos && end > begin) {
+                gpu = line.substr(begin, end - begin);
+            }
+        }
+        if (gpu.empty()) gpu = "DirectML";
+    } else if (line.find("RVM backend=CPU") != std::string::npos) {
+        gpu = "CPU";
+    }
+
+    if (line.find("AlphaPacked") != std::string::npos) {
+        mode = "Alpha Packed";
+    } else if (line.find("chroma-key") != std::string::npos ||
+               line.find("Chroma Key") != std::string::npos) {
+        mode = "Chroma Key";
+    } else if (line.find("libvpx-vp9") != std::string::npos ||
+               line.find("WebM VP9") != std::string::npos) {
+        mode = "Alpha WebM VP9";
+    }
+
+    const auto report = [&](const std::string& severity,
+                            const std::string& message) {
+        const std::string displayGpu = gpu.empty()
+            ? AiBackendDisplayName(ai_backend_, directml_device_)
+            : gpu;
+        AiOutputMode selectedMode;
+        {
+            std::lock_guard<std::mutex> lock(ai_mode_mutex_);
+            selectedMode = ai_output_mode_;
+        }
+        const std::string displayMode = mode.empty()
+            ? AiOutputModeDisplayName(selectedMode)
+            : mode;
+        ReportAiError(severity, displayGpu, displayMode,
+                      codec.empty() ? "unknown" : codec, message);
+    };
+
+    constexpr std::string_view errorMarker = "PERSISTENT_ERROR:";
+    const size_t errorPos = line.find(errorMarker);
+    if (errorPos != std::string::npos) {
+        std::string detail = Trim(line.substr(errorPos + errorMarker.size()));
+        std::string severity = "ERROR";
+        constexpr std::string_view fallbackPrefix = "FALLBACK:";
+        constexpr std::string_view fatalPrefix = "FATAL:";
+        if (detail.rfind(fallbackPrefix, 0) == 0) {
+            severity = "FALLBACK";
+            detail = Trim(detail.substr(fallbackPrefix.size()));
+        } else if (detail.rfind(fatalPrefix, 0) == 0) {
+            severity = "FATAL";
+            detail = Trim(detail.substr(fatalPrefix.size()));
+        }
+        report(severity, detail);
+        return;
+    }
+
+    // Existing resident-worker failures predate PERSISTENT_ERROR. They trigger
+    // a one-shot worker fallback, so surface them immediately instead of hiding
+    // them in the scrolling log.
+    constexpr std::string_view residentError = "RESIDENT_STREAM_ERROR";
+    if (const size_t pos = line.find(residentError); pos != std::string::npos) {
+        report("FALLBACK", Trim(line.substr(pos)));
+        return;
+    }
+
+    // Existing one-shot initialization failures also predate PERSISTENT_ERROR.
+    if (const size_t pos = line.find("ERROR init:"); pos != std::string::npos) {
+        report("FATAL", Trim(line.substr(pos)));
+        return;
+    }
+
+    // FFmpeg can reject D3D11 hardware decode and silently continue with a
+    // software frame. That is a real fallback and must remain visible.
+    if (line.find("Failed setup for format d3d11") != std::string::npos ||
+        line.find("hwaccel initialisation returned error") != std::string::npos) {
+        report("FALLBACK", line);
+    }
 }
 
 bool DlnaServer::SetupHttpListener() {
@@ -1819,7 +2793,7 @@ void DlnaServer::HandleHttpClient(SOCKET client) {
     // Only our own player is a guaranteed compatibility exception. All other
     // clients use the generic DLNA/HTTP virtual-range experiment.
     g_r800zz_vrplayer_request = IsR800zzVrPlayerRequest(request);
-    if (ai_passthrough_ &&
+    if (ai_passthrough_.load(std::memory_order_relaxed) &&
         (routePathLower == "/contentdirectory/control" ||
          routePathLower == "/connectionmanager/control" ||
          routePathLower == "/media" ||
@@ -1847,6 +2821,19 @@ void DlnaServer::HandleHttpClient(SOCKET client) {
     }
 
     if ((method == "GET" || method == "HEAD") &&
+        (routePathLower == "/" || routePathLower == "/pc2hmd.html")) {
+        const std::string body = Pc2HmdHtml();
+        std::ostringstream response;
+        response << "HTTP/1.1 200 OK\r\n"
+                 << "SERVER: Windows/10.0 UPnP/1.1 R800ZZ-DLNA/1.0\r\n"
+                 << "Content-Type: text/html; charset=\"utf-8\"\r\n"
+                 << "Cache-Control: no-store\r\n"
+                 << "Content-Length: " << body.size() << "\r\n"
+                 << "Connection: close\r\n\r\n";
+        if (method != "HEAD") response << body;
+        SendAll(client, response.str());
+        AddLog(method + " " + routePath + " -> 200 PC-to-HMD page");
+    } else if ((method == "GET" || method == "HEAD") &&
         routePathLower == "/-_-9213--api/files") {
         std::ostringstream json;
         json << "[\n";
@@ -1857,6 +2844,11 @@ void DlnaServer::HandleHttpClient(SOCKET client) {
                  << ",\"name\":\""
                  << JsonEscape(WideToUtf8(item.path.filename().wstring())) << "\""
                  << ",\"url\":\"" << JsonEscape(MediaUrl(item)) << "\""
+                 << ",\"downloadUrl\":\"http://"
+                 << JsonEscape(advertised_ip_) << ':' << http_port_
+                 << "/-_-9213--api/download/" << item.id << '/'
+                 << UrlEncodePathSegment(WideToUtf8(item.path.filename().wstring()))
+                 << "\""
                  << ",\"size\":" << item.size
                  << ",\"parentId\":\"" << JsonEscape(item.parent_id) << "\""
                  << ",\"isVideo\":" << (item.is_video ? "true" : "false")
@@ -1879,7 +2871,8 @@ void DlnaServer::HandleHttpClient(SOCKET client) {
         AddLog(method + " /-_-9213--api/files -> 200 files=" +
                std::to_string(media_items_.size()));
     } else if (method == "OPTIONS" &&
-               routePathLower == "/-_-9213--api/files") {
+               (routePathLower == "/-_-9213--api/files" ||
+                routePathLower.rfind("/-_-9213--api/download/", 0) == 0)) {
         SendAll(client,
                 "HTTP/1.1 204 No Content\r\n"
                 "Access-Control-Allow-Origin: *\r\n"
@@ -1887,6 +2880,104 @@ void DlnaServer::HandleHttpClient(SOCKET client) {
                 "Access-Control-Allow-Headers: *\r\n"
                 "Content-Length: 0\r\n"
                 "Connection: close\r\n\r\n");
+    } else if ((method == "GET" || method == "HEAD") &&
+               routePathLower.rfind("/-_-9213--api/download/", 0) == 0) {
+        constexpr std::string_view prefix = "/-_-9213--api/download/";
+        std::string idText = routePath.substr(prefix.size());
+        const size_t slash = idText.find('/');
+        if (slash != std::string::npos) idText.resize(slash);
+
+        const MediaItem* item = nullptr;
+        try {
+            const unsigned long parsed = std::stoul(idText);
+            if (parsed > 0 && parsed <= media_items_.size()) {
+                const MediaItem& candidate = media_items_[parsed - 1];
+                if (candidate.id == parsed) item = &candidate;
+            }
+        } catch (...) {
+        }
+
+        if (!item) {
+            SendAll(client, HttpError(404, "Not Found"));
+            closesocket(client);
+            return;
+        }
+
+        // Downloader path is intentionally independent from DLNA playback and
+        // AI passthrough. Always return the exact source file bytes and name.
+        const uint64_t total = item->size;
+        uint64_t start = 0;
+        uint64_t end = total > 0 ? total - 1 : 0;
+        const std::string range = HeaderValue(request, "range");
+        const bool hasRange = !range.empty();
+        const bool partial = total > 0 && hasRange && ParseRange(range, total, start, end);
+
+        if (hasRange && !partial) {
+            std::ostringstream response;
+            response << "HTTP/1.1 416 Range Not Satisfiable\r\n"
+                     << "Content-Range: bytes */" << total << "\r\n"
+                     << "Accept-Ranges: bytes\r\n"
+                     << "Access-Control-Allow-Origin: *\r\n"
+                     << "Access-Control-Expose-Headers: Content-Disposition, Content-Length, Content-Range, Accept-Ranges\r\n"
+                     << "Content-Length: 0\r\n"
+                     << "Connection: close\r\n\r\n";
+            SendAll(client, response.str());
+            AddLog(method + " /-_-9213--api/download -> 416");
+            closesocket(client);
+            return;
+        }
+
+        const uint64_t length64 = total == 0 ? 0 : end - start + 1;
+        const std::string sourceName = WideToUtf8(item->path.filename().wstring());
+        std::ostringstream headers;
+        headers << "HTTP/1.1 " << (partial ? "206 Partial Content" : "200 OK") << "\r\n"
+                << "Content-Type: " << SourceMimeTypeForPath(item->path) << "\r\n"
+                << "Content-Disposition: " << DownloadContentDisposition(sourceName) << "\r\n"
+                << "Accept-Ranges: bytes\r\n"
+                << "Access-Control-Allow-Origin: *\r\n"
+                << "Access-Control-Expose-Headers: Content-Disposition, Content-Length, Content-Range, Accept-Ranges\r\n"
+                << "Cache-Control: no-store\r\n"
+                << "Content-Length: " << length64 << "\r\n";
+        if (partial) {
+            headers << "Content-Range: bytes " << start << '-' << end << '/' << total << "\r\n";
+        }
+        headers << "Connection: close\r\n\r\n";
+
+        if (!SendAll(client, headers.str()) || method == "HEAD" || length64 == 0) {
+            AddLog(method + " /-_-9213--api/download/" + std::to_string(item->id) +
+                   " -> " + (partial ? "206" : "200") + " source file");
+            closesocket(client);
+            return;
+        }
+
+        std::ifstream file(item->path, std::ios::binary);
+        if (!file) {
+            AddLog("download API failed to open source file");
+            closesocket(client);
+            return;
+        }
+
+        file.seekg(static_cast<std::streamoff>(start));
+        uint64_t remaining = length64;
+        uint64_t sentBody = 0;
+        bool sendFailed = false;
+        std::array<char, 256 * 1024> fileBuffer{};
+        while (remaining > 0 && file && running_) {
+            const size_t want = static_cast<size_t>(
+                std::min<uint64_t>(remaining, fileBuffer.size()));
+            file.read(fileBuffer.data(), static_cast<std::streamsize>(want));
+            const std::streamsize got = file.gcount();
+            if (got <= 0) break;
+            if (!SendAll(client, fileBuffer.data(), static_cast<size_t>(got))) {
+                sendFailed = true;
+                break;
+            }
+            sentBody += static_cast<uint64_t>(got);
+            remaining -= static_cast<uint64_t>(got);
+        }
+        AddLog("download API source bytes sent=" + std::to_string(sentBody) +
+               " expected=" + std::to_string(length64) +
+               (sendFailed ? " (client disconnected/send failed)" : ""));
     } else if ((method == "GET" || method == "HEAD") && routePathLower == "/device.xml") {
         SendAll(client, HttpResponse(DeviceDescriptionXml(),
                                      "text/xml; charset=\"utf-8\"", method != "HEAD"));
@@ -1976,7 +3067,70 @@ void DlnaServer::HandleHttpClient(SOCKET client) {
             closesocket(client);
             return;
         }
-        if (ai_passthrough_ && item->is_video) {
+        if (item->is_video && method == "GET") {
+            // AI ON/OFF and output-mode changes use the same two playback
+            // boundaries: loading a different media item, or an explicit seek
+            // to 0. Never mutate the in-flight RUN that was already started.
+            bool explicitZeroSeek = false;
+            const std::string timeSeek = HeaderValue(request, "timeseekrange.dlna.org");
+            const int64_t dlnaStartMs = ParseDlnaTimeSeekStartMs(timeSeek);
+            if (dlnaStartMs >= 0) {
+                explicitZeroSeek = dlnaStartMs == 0;
+            } else {
+                const std::string startHeader = HeaderValue(request, "x-r800zz-start-ms");
+                if (!startHeader.empty()) {
+                    char* end = nullptr;
+                    const long long parsed = std::strtoll(startHeader.c_str(), &end, 10);
+                    if (end != startHeader.c_str() && parsed >= 0) {
+                        explicitZeroSeek = parsed == 0;
+                    }
+                }
+            }
+
+            bool fileLoadTrigger = false;
+            bool zeroSeekTrigger = false;
+            bool stateApplied = false;
+            bool appliedEnabled = ai_passthrough_.load(std::memory_order_relaxed);
+            AiOutputMode appliedMode = AiOutputMode::AlphaPackedHevc;
+            {
+                std::lock_guard<std::mutex> lock(ai_mode_mutex_);
+                fileLoadTrigger = active_ai_media_id_ == 0 ||
+                                  active_ai_media_id_ != item->id;
+                zeroSeekTrigger = !fileLoadTrigger && explicitZeroSeek;
+
+                if (fileLoadTrigger) {
+                    active_ai_media_id_ = item->id;
+                }
+
+                if ((fileLoadTrigger || zeroSeekTrigger) &&
+                    (ai_passthrough_change_pending_ ||
+                     ai_output_mode_change_pending_)) {
+                    ai_passthrough_.store(selected_ai_passthrough_,
+                                          std::memory_order_relaxed);
+                    if (selected_ai_passthrough_) {
+                        active_ai_output_mode_ = ai_output_mode_;
+                    }
+                    ai_passthrough_change_pending_ = false;
+                    ai_output_mode_change_pending_ = false;
+                    appliedEnabled = selected_ai_passthrough_;
+                    appliedMode = active_ai_output_mode_;
+                    stateApplied = true;
+                }
+            }
+
+            if (stateApplied) {
+                const std::string boundary =
+                    fileLoadTrigger ? "file load" : "zero seek";
+                if (appliedEnabled) {
+                    AddLog("AI Passthrough applied at " + boundary +
+                           ": ON, " + AiOutputModeDisplayName(appliedMode) + ".");
+                } else {
+                    AddLog("AI Passthrough applied at " + boundary + ": OFF.");
+                }
+            }
+        }
+
+        if (ai_passthrough_.load(std::memory_order_relaxed) && item->is_video) {
             // CUDA / DirectML / CPU all use the same DLNA/HTTP/pipe streaming path.
             // Non-video files such as .vrm are always served as their raw bytes.
             HandleAiPassthroughStream(client, method, request, *item);
@@ -2098,11 +3252,13 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
     int64_t requested_start_ms = 0;
     bool dlna_time_seek_request = false;
     bool legacy_r800zz_seek_request = false;
+    bool explicit_zero_seek_request = false;
     const std::string timeSeek = HeaderValue(request, "timeseekrange.dlna.org");
     const int64_t dlnaStartMs = ParseDlnaTimeSeekStartMs(timeSeek);
     if (dlnaStartMs >= 0) {
         requested_start_ms = dlnaStartMs;
         dlna_time_seek_request = true;
+        explicit_zero_seek_request = dlnaStartMs == 0;
     } else {
         // Backward-compatible fallback for existing R800ZZ VR Player builds.
         const std::string startHeader = HeaderValue(request, "x-r800zz-start-ms");
@@ -2111,17 +3267,38 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
             const long long parsed = std::strtoll(startHeader.c_str(), &end, 10);
             if (end != startHeader.c_str() && parsed >= 0) {
                 requested_start_ms = static_cast<int64_t>(parsed);
+                explicit_zero_seek_request = requested_start_ms == 0;
                 legacy_r800zz_seek_request = requested_start_ms > 0;
             }
         }
     }
+
+    AiOutputMode requestOutputMode = AiOutputMode::AlphaPackedHevc;
+    {
+        std::lock_guard<std::mutex> lock(ai_mode_mutex_);
+        requestOutputMode = active_ai_output_mode_;
+    }
+
+    const auto requestMimeType = [&]() -> const char* {
+        return requestOutputMode == AiOutputMode::WebmVp9Alpha
+            ? "video/webm" : "video/mp2t";
+    };
+    const auto requestOutputLabel = [&]() {
+        if (requestOutputMode == AiOutputMode::WebmVp9Alpha) {
+            return std::string("Alpha: WebM VP9 Alpha/libvpx (may drop frames)");
+        }
+        if (requestOutputMode == AiOutputMode::ChromaKeyHevc) {
+            return std::string("Chroma Key: Green background HEVC/NVENC");
+        }
+        return std::string("Alpha: AlphaPacked HEVC/NVENC");
+    };
 
     // Generic DLNA/HTTP clients may use the experimental virtual byte range.
     // r800zzvrplayer is the only compatibility exception because its User-Agent
     // and custom X-R800ZZ-Start-Ms behavior are under our control.
     const bool virtual_range_enabled = !g_r800zz_vrplayer_request;
     const bool fixed_muxrate_ts =
-        ai_output_mode_ != AiOutputMode::WebmVp9Alpha;
+        requestOutputMode != AiOutputMode::WebmVp9Alpha;
     const uint64_t virtual_total_bytes = virtual_range_enabled
         ? (fixed_muxrate_ts
             ? RealtimeTsVirtualSizeBytes(item.duration_ms)
@@ -2233,8 +3410,15 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
     } else if (legacy_r800zz_seek_request && !byteRange.empty()) {
         AddLog("R800ZZ start-ms takes precedence over HTTP Range: " + byteRange);
     }
-    if (item.duration_ms > 0) {
-        requested_start_ms = std::min(requested_start_ms, item.duration_ms);
+    if (item.duration_ms > 0 && requested_start_ms >= item.duration_ms) {
+        // A player can carry the previous media position into the first GET for
+        // a newly selected, shorter item. Seeking to the exact EOF produces no
+        // output bytes, so treat an out-of-range time seek as a fresh start.
+        // Valid seeks inside an audio-only tail remain unchanged.
+        AddLog("AI seek startMs=" + std::to_string(requested_start_ms) +
+               " is outside durationMs=" + std::to_string(item.duration_ms) +
+               "; starting from 0");
+        requested_start_ms = 0;
     }
 
     const bool virtual_finite_response =
@@ -2265,7 +3449,7 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
             std::to_string(item.duration_ms) + "|" +
             AiBackendArgument(ai_backend_) + "|" +
             std::to_string(cacheDevice) + "|" +
-            AiOutputModeArgument(ai_output_mode_) + "|" +
+            AiOutputModeArgument(requestOutputMode) + "|" +
             std::to_string(virtual_total_bytes);
     }
 
@@ -2286,7 +3470,7 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
         std::ostringstream headers;
         headers << "HTTP/1.1 "
                 << (virtual_byte_seek_request ? "206 Partial Content" : "200 OK") << "\r\n"
-                << "Content-Type: " << MimeType(item) << "\r\n"
+                << "Content-Type: " << requestMimeType() << "\r\n"
                 << "Accept-Ranges: "
                 << ((virtual_finite_response || virtual_byte_seek_request) ? "bytes" : "none")
                 << "\r\n"
@@ -2325,7 +3509,7 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                 generic_tail_probe_cache_key, virtual_body_length, cachedTail)) {
             std::ostringstream headers;
             headers << "HTTP/1.1 206 Partial Content\r\n"
-                    << "Content-Type: " << MimeType(item) << "\r\n"
+                    << "Content-Type: " << requestMimeType() << "\r\n"
                     << "Accept-Ranges: bytes\r\n"
                     << "transferMode.dlna.org: Streaming\r\n"
                     << "contentFeatures.dlna.org: " << DlnaContentFeatures() << "\r\n"
@@ -2355,6 +3539,61 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
         AddLog("GENERIC_SEEKABLE tail PCR probe cache miss");
     }
 
+    // Keep the 10/10 stream-handoff protection only for r800zzvrplayer.
+    // Generic DLNA clients may open independent Range/PCR probe GETs while the
+    // main playback GET is still active.  Those requests must not be treated as
+    // replacement playback streams; this preserves the previously working
+    // generic/DeoVR resident-worker behavior.
+    const bool useStreamHandoff = g_r800zz_vrplayer_request;
+    const uint64_t aiStreamGeneration = useStreamHandoff
+        ? g_ai_stream_generation.fetch_add(1, std::memory_order_acq_rel) + 1
+        : 0;
+
+    if (useStreamHandoff) {
+        std::lock_guard<std::mutex> ownerLock(g_ai_stream_owner_mutex);
+        if (g_active_ai_stream_client != INVALID_SOCKET &&
+            g_active_ai_stream_client != client) {
+            shutdown(g_active_ai_stream_client, SD_BOTH);
+        }
+        g_active_ai_stream_client = client;
+    }
+
+    struct AiStreamOwnerGuard {
+        SOCKET client{INVALID_SOCKET};
+        uint64_t generation{0};
+        bool enabled{false};
+        ~AiStreamOwnerGuard() {
+            if (!enabled) return;
+            std::lock_guard<std::mutex> ownerLock(g_ai_stream_owner_mutex);
+            if (g_active_ai_stream_client == client &&
+                g_ai_stream_generation.load(std::memory_order_acquire) == generation) {
+                g_active_ai_stream_client = INVALID_SOCKET;
+            }
+        }
+    } aiStreamOwner{client, aiStreamGeneration, useStreamHandoff};
+
+    std::unique_lock<std::mutex> aiStreamLock;
+    if (useStreamHandoff) {
+        aiStreamLock = std::unique_lock<std::mutex>(g_ai_stream_serial_mutex);
+        if (!running_ ||
+            g_ai_stream_generation.load(std::memory_order_acquire) != aiStreamGeneration) {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> ownerLock(g_ai_stream_owner_mutex);
+            if (g_active_ai_stream_client != client) {
+                return;
+            }
+        }
+    }
+
+    const auto aiStreamSuperseded = [&]() -> bool {
+        return !running_ ||
+            (useStreamHandoff &&
+             g_ai_stream_generation.load(std::memory_order_acquire) !=
+                 aiStreamGeneration);
+    };
+
     const bool cudaBackend = ai_backend_ == AiBackend::NvidiaCuda;
     // CUDA / DirectML / CPU all use the same worker executable.
     const std::filesystem::path worker =
@@ -2377,15 +3616,37 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
         return;
     }
 
+    struct ResidentAiUseGuard {
+        ResidentAiState* state{nullptr};
+
+        void release() {
+            if (!state) return;
+            ResidentAiState* current = state;
+            state = nullptr;
+            if (current->active_http_users.fetch_sub(
+                    1, std::memory_order_acq_rel) == 1) {
+                current->http_users_cv.notify_all();
+            }
+        }
+
+        ~ResidentAiUseGuard() {
+            release();
+        }
+    } residentUse;
+
     ResidentAiState* resident = nullptr;
     {
         std::lock_guard<std::mutex> lock(resident_ai_mutex_);
-        if (resident_ai_) {
+        if (resident_ai_ &&
+            !resident_ai_->stopping.load(std::memory_order_acquire)) {
             DWORD code = STILL_ACTIVE;
-            if (resident_ai_->process &&
+            if (resident_ai_->process && resident_ai_->stdin_write &&
                 GetExitCodeProcess(resident_ai_->process, &code) &&
                 code == STILL_ACTIVE) {
                 resident = resident_ai_.get();
+                resident->active_http_users.fetch_add(
+                    1, std::memory_order_acq_rel);
+                residentUse.state = resident;
             }
         }
     }
@@ -2405,8 +3666,15 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
             1, 256 * 1024, 256 * 1024, 0, nullptr);
 
         if (streamPipe == INVALID_HANDLE_VALUE) {
-            AddLog("AI resident output pipe creation failed Win32=" +
-                   std::to_string(GetLastError()) + "; using one-shot worker.");
+            const std::string message =
+                "AI resident output pipe creation failed Win32=" +
+                std::to_string(GetLastError()) + "; using one-shot worker.";
+            AddLog(message);
+            ReportAiError("FALLBACK",
+                          AiBackendDisplayName(ai_backend_, directml_device_),
+                          AiOutputModeDisplayName(requestOutputMode),
+                          "unknown", message);
+            residentUse.release();
             resident = nullptr;
         } else {
             const int residentDevice =
@@ -2417,7 +3685,7 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                 std::to_string(requested_start_ms) + " " +
                 AiBackendArgument(ai_backend_) + " " +
                 std::to_string(residentDevice) + " " +
-                AiOutputModeArgument(ai_output_mode_) + " " + pipeName + " " +
+                AiOutputModeArgument(requestOutputMode) + " " + pipeName + " " +
                 HexEncode(WideToUtf8(item.path.wstring())) + "\n";
             bool commandOk = false;
             {
@@ -2430,9 +3698,16 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
             }
 
             if (!commandOk) {
-                AddLog("AI resident RUN command failed Win32=" +
-                       std::to_string(GetLastError()) + "; using one-shot worker.");
+                const std::string message =
+                    "AI resident RUN command failed Win32=" +
+                    std::to_string(GetLastError()) + "; using one-shot worker.";
+                AddLog(message);
+                ReportAiError("FALLBACK",
+                              AiBackendDisplayName(ai_backend_, directml_device_),
+                              AiOutputModeDisplayName(requestOutputMode),
+                              "unknown", message);
                 CloseHandle(streamPipe);
+                residentUse.release();
                 resident = nullptr;
             } else {
                 AddLog("AI Passthrough using resident worker/RVM session.");
@@ -2444,11 +3719,15 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                 bool connected = false;
                 bool startupFailed = false;
                 bool startupTimeout = false;
-                std::array<char, 256 * 1024> data{};
+                std::vector<char> data(256 * 1024);
                 DWORD firstGot = 0;
                 const auto startupBegin = std::chrono::steady_clock::now();
 
                 while (!connected) {
+                    if (aiStreamSuperseded()) {
+                        startupFailed = true;
+                        break;
+                    }
                     if (ConnectNamedPipe(streamPipe, nullptr)) {
                         connected = true;
                         break;
@@ -2471,6 +3750,10 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                 }
 
                 while (connected && !startupFailed && !startupTimeout && firstGot == 0) {
+                    if (aiStreamSuperseded()) {
+                        startupFailed = true;
+                        break;
+                    }
                     DWORD available = 0;
                     if (!PeekNamedPipe(streamPipe, nullptr, 0, nullptr, &available, nullptr)) {
                         startupFailed = true;
@@ -2503,9 +3786,19 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                         WriteFile(resident->stdin_write, cancel.data(),
                                   static_cast<DWORD>(cancel.size()), &ignored, nullptr);
                     }
-                    AddLog(startupTimeout
+                    if (aiStreamSuperseded()) {
+                        AddLog("AI resident stream replaced by a newer media request before first output.");
+                        return;
+                    }
+                    const std::string message = startupTimeout
                         ? "AI resident stream startup timed out; using one-shot worker."
-                        : "AI resident stream failed before first output byte; using one-shot worker.");
+                        : "AI resident stream failed before first output byte; using one-shot worker.";
+                    AddLog(message);
+                    ReportAiError("FALLBACK",
+                                  AiBackendDisplayName(ai_backend_, directml_device_),
+                                  AiOutputModeDisplayName(requestOutputMode),
+                                  "unknown", message);
+                    residentUse.release();
                     resident = nullptr;
                 } else {
                     const auto startupMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2518,7 +3811,7 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                     headers << "HTTP/1.1 "
                             << ((dlna_time_seek_request || legacy_r800zz_seek_request || virtual_byte_seek_request)
                                 ? "206 Partial Content" : "200 OK") << "\r\n"
-                            << "Content-Type: " << MimeType(item) << "\r\n"
+                            << "Content-Type: " << requestMimeType() << "\r\n"
                             << "Accept-Ranges: "
                             << ((virtual_finite_response || virtual_byte_seek_request) ? "bytes" : "none")
                             << "\r\n"
@@ -2596,7 +3889,8 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                     }
 
                     auto pipeGapStart = std::chrono::steady_clock::time_point{};
-                    while (!sendFailed && !virtualBodyComplete && running_) {
+                    while (!sendFailed && !virtualBodyComplete &&
+                           running_ && !aiStreamSuperseded()) {
                         DWORD available = 0;
                         if (!PeekNamedPipe(streamPipe, nullptr, 0, nullptr,
                                            &available, nullptr)) {
@@ -2617,12 +3911,10 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                         if (pipeGapStart != std::chrono::steady_clock::time_point{}) {
                             const auto gapMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::steady_clock::now() - pipeGapStart).count();
-                            if (gapMs >= 80) {
-                                AddLog("SERVER_PIPE_GAP mode=resident ms=" +
-                                       std::to_string(gapMs) +
-                                       " available=" + std::to_string(available) +
-                                       " sentBody=" + std::to_string(sentBody));
-                            }
+                            // High-frequency pipe timing diagnostics are intentionally
+                            // not written to the normal UI log. They hide real errors
+                            // and add formatting/mutex overhead on the streaming path.
+                            (void)gapMs;
                             pipeGapStart = std::chrono::steady_clock::time_point{};
                         }
                         DWORD got = 0;
@@ -2639,12 +3931,8 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                         }
                         const auto sendMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - sendStart).count();
-                        if (sendMs >= 80) {
-                            AddLog("SERVER_SEND_SLOW mode=resident ms=" +
-                                   std::to_string(sendMs) +
-                                   " bytes=" + std::to_string(got) +
-                                   " sentBody=" + std::to_string(sentBody));
-                        }
+                        // Keep send timing off the normal UI log.
+                        (void)sendMs;
                     }
 
                     if (!sendFailed && virtual_tail_duration_probe) {
@@ -2698,7 +3986,8 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                     }
 
                     CloseHandle(streamPipe);
-                    if (sendFailed || !running_ || virtualBodyComplete) {
+                    if (sendFailed || !running_ || virtualBodyComplete ||
+                        aiStreamSuperseded()) {
                         std::lock_guard<std::mutex> controlLock(resident->control_mutex);
                         const std::string cancel =
                             "CANCEL " + std::to_string(sequence) + "\n";
@@ -2718,6 +4007,10 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
         }
     }
 
+    if (aiStreamSuperseded()) {
+        return;
+    }
+
     // Start the GPU worker BEFORE sending HTTP 200.  The previous build sent
     // 200 first and then initialized CUDA/ONNX/NVENC.  Some clients time out
     // when the response body remains empty during that initialization window.
@@ -2725,10 +4018,13 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
     const bool launched = LaunchAiProcess(
         worker, item.path, model, requested_start_ms,
         ai_backend_, cudaBackend ? 0 : directml_device_,
-        ai_output_mode_, process);
+        requestOutputMode, process);
     if (!launched) {
-        AddLog("AI Passthrough error: could not start worker. Win32=" +
-               std::to_string(GetLastError()));
+        const std::string message =
+            "AI Passthrough could not start worker. Win32=" +
+            std::to_string(GetLastError());
+        AddLog("AI Passthrough error: " + message);
+        ReportAiError("FATAL", "unknown", requestOutputLabel(), "unknown", message);
         SendAll(client, HttpError(500, "AI Worker Start Failed"));
         return;
     }
@@ -2737,13 +4033,18 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
            (cudaBackend ? "CUDA" :
             (ai_backend_ == AiBackend::DirectML ? "DirectML" : "CPU")) +
            "; waiting for first output bytes before HTTP 200. Output=" +
-           AiOutputLabel());
+           requestOutputLabel());
     if (requested_start_ms > 0) {
         AddLog("AI Passthrough seek request startMs=" + std::to_string(requested_start_ms));
     }
 
     std::atomic<int64_t> source_duration_ms{0};
-    std::thread stderr_thread([this, handle = process.stderr_read, &source_duration_ms, cudaBackend]() {
+    std::string workerErrorGpu = cudaBackend ? "NVIDIA CUDA" : std::string{};
+    std::string workerErrorMode = AiOutputModeDisplayName(requestOutputMode);
+    std::string workerErrorCodec;
+    std::thread stderr_thread([this, handle = process.stderr_read, &source_duration_ms,
+                               &workerErrorGpu, &workerErrorMode,
+                               &workerErrorCodec, cudaBackend]() {
         std::array<char, 4096> data{};
         std::string pending;
         DWORD got = 0;
@@ -2764,15 +4065,27 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                     }
                 }
                 line = SanitizeWorkerLog(line);
-                if (!line.empty()) AddLog(std::string(cudaBackend ? "GPU: " : "DML: ") + line);
+                if (!line.empty()) {
+                    HandleWorkerDiagnosticLine(
+                        line, workerErrorGpu, workerErrorMode, workerErrorCodec);
+                    if (ShouldShowWorkerLog(line)) {
+                        AddLog(std::string(cudaBackend ? "GPU: " : "DML: ") + line);
+                    }
+                }
                 pending.erase(0, pos + 1);
             }
         }
         pending = SanitizeWorkerLog(pending);
-        if (!pending.empty()) AddLog(std::string(cudaBackend ? "GPU: " : "DML: ") + pending);
+        if (!pending.empty()) {
+            HandleWorkerDiagnosticLine(
+                pending, workerErrorGpu, workerErrorMode, workerErrorCodec);
+            if (ShouldShowWorkerLog(pending)) {
+                AddLog(std::string(cudaBackend ? "GPU: " : "DML: ") + pending);
+            }
+        }
     });
 
-    std::array<char, 256 * 1024> data{};
+    std::vector<char> data(256 * 1024);
     DWORD first_got = 0;
     bool startup_failed = false;
     bool startup_timeout = false;
@@ -2816,17 +4129,30 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
     }
 
     if (startup_failed || startup_timeout || first_got == 0) {
+        std::string message;
         if (startup_timeout) {
-            AddLog("AI Passthrough startup failed: no output bytes after 120 seconds.");
+            message = "AI Passthrough startup failed: no output bytes after 120 seconds.";
         } else {
             DWORD exit_code = STILL_ACTIVE;
             GetExitCodeProcess(process.process, &exit_code);
-            AddLog("AI Passthrough startup failed before first output byte. processExit=" +
-                   std::to_string(exit_code));
+            message =
+                "AI Passthrough startup failed before first output byte. processExit=" +
+                std::to_string(exit_code);
         }
+        AddLog(message);
         TerminateAiProcess(process);
         WaitForSingleObject(process.process, 5000);
         if (stderr_thread.joinable()) stderr_thread.join();
+        ReportAiError(
+            "FATAL",
+            workerErrorGpu.empty()
+                ? AiBackendDisplayName(ai_backend_, directml_device_)
+                : workerErrorGpu,
+            workerErrorMode.empty()
+                ? AiOutputModeDisplayName(requestOutputMode)
+                : workerErrorMode,
+            workerErrorCodec.empty() ? "unknown" : workerErrorCodec,
+            message);
         SendAll(client, HttpError(500, "AI Pipeline Failed"));
         CloseAiProcess(process);
         return;
@@ -2847,7 +4173,7 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
     headers << "HTTP/1.1 "
             << ((dlna_time_seek_request || legacy_r800zz_seek_request || virtual_byte_seek_request)
                 ? "206 Partial Content" : "200 OK") << "\r\n"
-            << "Content-Type: " << MimeType(item) << "\r\n"
+            << "Content-Type: " << requestMimeType() << "\r\n"
             << "Accept-Ranges: "
             << ((virtual_finite_response || virtual_byte_seek_request) ? "bytes" : "none")
             << "\r\n"
@@ -2932,19 +4258,16 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
         send_failed = true;
     }
 
-    while (!send_failed && !virtual_body_complete && running_) {
+    while (!send_failed && !virtual_body_complete &&
+           running_ && !aiStreamSuperseded()) {
         DWORD got = 0;
         const auto readStart = std::chrono::steady_clock::now();
         const BOOL ok = ReadFile(process.stdout_read, data.data(),
                                  static_cast<DWORD>(data.size()), &got, nullptr);
         const auto readMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - readStart).count();
-        if (readMs >= 80) {
-            AddLog("SERVER_PIPE_GAP mode=oneshot ms=" +
-                   std::to_string(readMs) +
-                   " bytes=" + std::to_string(got) +
-                   " sentBody=" + std::to_string(sent_body));
-        }
+        // Keep pipe timing off the normal UI log.
+        (void)readMs;
         if (!ok || got == 0) break;
 
         const auto sendStart = std::chrono::steady_clock::now();
@@ -2954,12 +4277,8 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
         }
         const auto sendMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - sendStart).count();
-        if (sendMs >= 80) {
-            AddLog("SERVER_SEND_SLOW mode=oneshot ms=" +
-                   std::to_string(sendMs) +
-                   " bytes=" + std::to_string(got) +
-                   " sentBody=" + std::to_string(sent_body));
-        }
+        // Keep send timing off the normal UI log.
+        (void)sendMs;
     }
 
     if (!send_failed && virtual_tail_duration_probe) {
@@ -3012,7 +4331,8 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
         }
     }
 
-    if (send_failed || !running_ || virtual_body_complete) {
+    if (send_failed || !running_ || virtual_body_complete ||
+        aiStreamSuperseded()) {
         TerminateAiProcess(process);
     }
 
@@ -3052,8 +4372,13 @@ std::string DlnaServer::MediaUrl(const MediaItem& item) const {
 }
 
 std::string DlnaServer::MimeType(const MediaItem& item) const {
-    if (ai_passthrough_ && item.is_video) {
-        return ai_output_mode_ == AiOutputMode::WebmVp9Alpha
+    if (ai_passthrough_.load(std::memory_order_relaxed) && item.is_video) {
+        AiOutputMode selectedMode;
+        {
+            std::lock_guard<std::mutex> lock(ai_mode_mutex_);
+            selectedMode = ai_output_mode_;
+        }
+        return selectedMode == AiOutputMode::WebmVp9Alpha
             ? "video/webm" : "video/mp2t";
     }
     const std::string ext = ToLower(item.path.extension().string());
@@ -3073,17 +4398,22 @@ std::string DlnaServer::MimeType(const MediaItem& item) const {
 }
 
 std::string DlnaServer::AiOutputLabel() const {
-    if (ai_output_mode_ == AiOutputMode::WebmVp9Alpha) {
+    AiOutputMode selectedMode;
+    {
+        std::lock_guard<std::mutex> lock(ai_mode_mutex_);
+        selectedMode = ai_output_mode_;
+    }
+    if (selectedMode == AiOutputMode::WebmVp9Alpha) {
         return "Alpha: WebM VP9 Alpha/libvpx (may drop frames)";
     }
-    if (ai_output_mode_ == AiOutputMode::ChromaKeyHevc) {
+    if (selectedMode == AiOutputMode::ChromaKeyHevc) {
         return "Chroma Key: Green background HEVC/NVENC";
     }
     return "Alpha: AlphaPacked HEVC/NVENC";
 }
 
 std::string DlnaServer::DlnaContentFeatures() const {
-    if (ai_passthrough_) {
+    if (ai_passthrough_.load(std::memory_order_relaxed)) {
         if (g_r800zz_vrplayer_request) {
             // Preserve the existing r800zzvrplayer contract: DLNA time seek only.
             return "DLNA.ORG_OP=10;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000";
@@ -3100,10 +4430,15 @@ std::string DlnaServer::DlnaProtocolInfo(const MediaItem* item) const {
             ":DLNA.ORG_OP=01;DLNA.ORG_CI=0;"
             "DLNA.ORG_FLAGS=01700000000000000000000000000000";
     }
-    if (item || ai_passthrough_) {
+    if (item || ai_passthrough_.load(std::memory_order_relaxed)) {
+        AiOutputMode selectedMode;
+        {
+            std::lock_guard<std::mutex> lock(ai_mode_mutex_);
+            selectedMode = ai_output_mode_;
+        }
         const std::string mime = item
             ? MimeType(*item)
-            : (ai_output_mode_ == AiOutputMode::WebmVp9Alpha
+            : (selectedMode == AiOutputMode::WebmVp9Alpha
                 ? "video/webm" : "video/mp2t");
         return "http-get:*:" + mime + ":" + DlnaContentFeatures();
     }
@@ -3352,12 +4687,18 @@ std::string DlnaServer::BrowseSoapResponse(const std::string& object_id,
         // virtual size model as HEAD/GET/Range. r800zzvrplayer keeps its
         // established stream-only metadata.
         uint64_t advertisedSize = item.size;
-        if (ai_passthrough_ && item.is_video &&
-            ai_output_mode_ != AiOutputMode::WebmVp9Alpha) {
+        AiOutputMode selectedMode;
+        {
+            std::lock_guard<std::mutex> lock(ai_mode_mutex_);
+            selectedMode = ai_output_mode_;
+        }
+        if (ai_passthrough_.load(std::memory_order_relaxed) && item.is_video &&
+            selectedMode != AiOutputMode::WebmVp9Alpha) {
             advertisedSize = RealtimeTsVirtualSizeBytes(item.duration_ms);
         }
         if (advertisedSize > 0 &&
-            (!ai_passthrough_ || !item.is_video || !g_r800zz_vrplayer_request)) {
+            (!ai_passthrough_.load(std::memory_order_relaxed) ||
+             !item.is_video || !g_r800zz_vrplayer_request)) {
             d << " size=\"" << advertisedSize << "\"";
         }
         if (item.duration_ms > 0) {
