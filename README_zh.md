@@ -2,6 +2,9 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 0.8 : 尝试修复了 GPU 识别问题。目前还不清楚改善了多少。
+### Ver 0.8 : 新增了通过 VR 视频播放器 r800zzvrplayer for PICO/Meta 从 PC 下载文件的功能。
+### Ver 0.8 : 修正了通过 HTML 从 PC 下载文件的功能。在 VR HMD 上使用 r800zzvrplayer 更方便。也可以用于 PC 与 PC 之间的文件传输。
 ### Ver 0.5 : 添加了 WebXR HTTPS 服务器。（可以运行存储在 PC 上的 WebXR 游戏。）
 
 用于 PICO、Meta Quest 和其他兼容设备上播放 XR 视频的 Windows DLNA 服务器，支持实时 AI 背景移除（RVM）、Alpha/色键输出和视频转换。
