@@ -2,6 +2,7 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 0.81 : 针对首次启动错误的对策。（已禁用从安装程序启动。）
 ### Ver 0.8 : 尝试修复了 GPU 识别问题。目前还不清楚改善了多少。
 ### Ver 0.8 : 新增了通过 VR 视频播放器 r800zzvrplayer for PICO/Meta 从 PC 下载文件的功能。
 ### Ver 0.8 : 修正了通过 HTML 从 PC 下载文件的功能。在 VR HMD 上使用 r800zzvrplayer 更方便。也可以用于 PC 与 PC 之间的文件传输。
