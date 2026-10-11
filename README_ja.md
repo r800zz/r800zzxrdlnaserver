@@ -2,13 +2,7 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
-### Ver 0.7 : HTML/JavaScript ダウンローダーへの接続に対応しました。
 ### Ver 0.5 : WebXR HTTPSサーバーを追加しました。（PCに保存したWebXRゲームをプレイできます。）
-### Ver 0.5 : DLNAの階層ディレクトリ閲覧に対応しました。
-### Ver 0.5 : AIファイル変換のGPU選択に対応しました。
-### Ver 0.5 : 動画プレイヤーのGPU処理を改善しました。
-### Ver 0.4 : NVIDIAであっても対応GPUが限定されるバグを修正しました。
-### Ver 0.4 : NVIDIA以外のGPUもDirectML経由で対応しました。
 
 PICO、Meta Quest、その他の互換デバイスでXR動画を再生するためのWindows用DLNAサーバーです。リアルタイムAI背景除去（RVM）、アルファ／クロマキー出力、動画変換に対応しています。
 
