@@ -2,6 +2,9 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 0.8 : GPUの認識問題を直そうとしました。どの程度改善したかはまだ分かりません。
+### Ver 0.8 : VR動画プレイヤーのr800zzvrplayer for PICO/MetaからPCのファイルをダウンロードする機能を追加しました。
+### Ver 0.8 : HTMLからのPCのファイルをダウンロードする機能の修正。VR HMDではr800zzvrplayerのほうが便利です。PCとPC間のファイル転送に使えます。
 ### Ver 0.5 : WebXR HTTPSサーバーを追加しました。（PCに保存したWebXRゲームをプレイできます。）
 
 PICO、Meta Quest、その他の互換デバイスでXR動画を再生するためのWindows用DLNAサーバーです。リアルタイムAI背景除去（RVM）、アルファ／クロマキー出力、動画変換に対応しています。
