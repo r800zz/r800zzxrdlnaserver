@@ -21,10 +21,21 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
   <img src="./jpeg/server_ru.jpeg" alt="r800zzXRdlnaServer for Windows" width="402" height="356" border="2">
 </a>
 
-### Загружайте файлы, хранящиеся на вашем ПК, из веб-браузера VR-шлема.
+### Загрузка файлов с ПК через r800zzvrplayer for PICO/Meta.
 
-<a href="https://vr180g.com/pc2hmd.html?l=ru">Download from r800zzXRdlnaServer</a>
+<a href="https://vr180g.com/pico/vrplayer.php?l=en">r800zzvrplayer for PICO/Meta</a>
 
+Ввод URL не требуется.  
+С помощью флажка можно включить поддержку файлов, отличных от видеофайлов.  
+Имя файла может измениться.
+
+### Передача файлов между ПК через DLNA (загрузка из веб-браузера)
+
+<a href="https://vr180g.com/pc2hmd.html?l=en">Download from r800zzXRdlnaServer</a>
+
+Необходимо ввести URL.  
+Может потребоваться изменение настроек браузера.  
+Имя файла может измениться.
 
 ## Сервер WebXR HTTPS
 
