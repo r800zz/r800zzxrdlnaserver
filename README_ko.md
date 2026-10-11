@@ -18,9 +18,21 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
   <img src="./jpeg/server_ko.jpeg" alt="r800zzXRdlnaServer for Windows" width="402" height="356" border="2">
 </a>
 
-### VR HMD의 웹 브라우저에서 PC에 저장된 파일을 다운로드합니다.
+### r800zzvrplayer for PICO/Meta에서 PC에 저장된 파일을 다운로드합니다.
 
-<a href="https://vr180g.com/pc2hmd.html?l=kr">Download from r800zzXRdlnaServer</a>
+<a href="https://vr180g.com/pico/vrplayer.php?l=en">r800zzvrplayer for PICO/Meta</a>
+
+URL을 입력할 필요가 없습니다.  
+체크박스를 사용하면 동영상 파일 이외의 파일도 지원합니다.  
+파일 이름이 변경될 수 있습니다.
+
+### DLNA를 통한 PC와 PC 간 파일 전송 (웹 브라우저에서 다운로드)
+
+<a href="https://vr180g.com/pc2hmd.html?l=en">Download from r800zzXRdlnaServer</a>
+
+URL을 입력해야 합니다.  
+브라우저 설정이 필요할 수 있습니다.  
+파일 이름이 변경될 수 있습니다.
 
 ## WebXR HTTPS 서버
 
