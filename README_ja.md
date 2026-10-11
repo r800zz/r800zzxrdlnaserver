@@ -25,6 +25,7 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 
 <a href="https://vr180g.com/pico/vrplayer.php?l=en">r800zzvrplayer for PICO/Meta</a>
 
+DLNA経由。  
 URLの入力は不要です。  
 チェックボックスで動画ファイル以外にも対応します。  
 ファイル名が変わることがあります。
