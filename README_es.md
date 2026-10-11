@@ -2,6 +2,9 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 0.8 : Se intentó corregir el problema de detección de la GPU. Aún no se sabe cuánto ha mejorado.
+### Ver 0.8 : Se añadió una función para descargar archivos desde un PC usando el reproductor de vídeo VR r800zzvrplayer for PICO/Meta.
+### Ver 0.8 : Se corrigió la función para descargar archivos desde un PC mediante HTML. En un VR HMD, r800zzvrplayer es más cómodo. También se puede utilizar para transferir archivos entre PCs.
 ### Ver 0.5 : Se añadió un servidor HTTPS WebXR. (Puedes jugar a juegos WebXR almacenados en tu PC.)
 
 Servidor DLNA para Windows destinado a la reproducción de vídeo XR en PICO, Meta Quest y otros dispositivos compatibles, con eliminación de fondo mediante IA en tiempo real (RVM), salida alfa/croma y conversión de vídeo.
