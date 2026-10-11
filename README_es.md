@@ -2,13 +2,7 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
-### Ver 0.7 : Se añadió compatibilidad para conectarse al descargador HTML/JavaScript.
 ### Ver 0.5 : Se añadió un servidor HTTPS WebXR. (Puedes jugar a juegos WebXR almacenados en tu PC.)
-### Ver 0.5 : Se añadió compatibilidad con la navegación jerárquica de carpetas en DLNA.
-### Ver 0.5 : Se añadió la selección de GPU para la conversión de archivos con IA.
-### Ver 0.5 : Se mejoró la gestión de GPU en el reproductor de vídeo.
-### Ver 0.4 : Se corrigió un error que limitaba la compatibilidad a determinadas GPU NVIDIA.
-### Ver 0.4 : Se añadió compatibilidad con GPU que no son NVIDIA mediante DirectML.
 
 Servidor DLNA para Windows destinado a la reproducción de vídeo XR en PICO, Meta Quest y otros dispositivos compatibles, con eliminación de fondo mediante IA en tiempo real (RVM), salida alfa/croma y conversión de vídeo.
 
