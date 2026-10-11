@@ -1,5 +1,5 @@
 #define MyAppName "r800zzXRdlnaServer"
-#define MyAppVersion "0.8"
+#define MyAppVersion "0.81"
 #define MyAppPublisher "R800ZZ"
 #define MyAppURL "https://vr180g.com/"
 #define MyAppExeName "r800zz_dlna_server.exe"
@@ -46,7 +46,7 @@ RestartApplications=no
 SetupLogging=yes
 
 ; Windows version metadata for the installer EXE.
-VersionInfoVersion=0.8.0.0
+VersionInfoVersion=0.8.1.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} installer
 VersionInfoProductName={#MyAppName}
@@ -71,7 +71,4 @@ Source: "..\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recurse
 [Icons]
 Name: "{userprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
 Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
-
-[Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
 
