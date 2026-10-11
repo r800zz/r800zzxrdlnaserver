@@ -21,9 +21,21 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
   <img src="./jpeg/server_es.jpeg" alt="r800zzXRdlnaServer for Windows" width="402" height="356" border="2">
 </a>
 
-### Descarga archivos almacenados en tu PC desde el navegador web de tu visor VR.
+### Descarga archivos almacenados en tu PC desde r800zzvrplayer for PICO/Meta.
 
-<a href="https://vr180g.com/pc2hmd.html?l=es">Download from r800zzXRdlnaServer</a>
+<a href="https://vr180g.com/pico/vrplayer.php?l=en">r800zzvrplayer for PICO/Meta</a>
+
+No es necesario introducir una URL.  
+Mediante una casilla de verificación, también se admiten archivos que no sean de vídeo.  
+El nombre del archivo puede cambiar.
+
+### Transferencia de archivos entre PCs mediante DLNA (descarga desde un navegador web)
+
+<a href="https://vr180g.com/pc2hmd.html?l=en">Download from r800zzXRdlnaServer</a>
+
+Es necesario introducir una URL.  
+Puede ser necesario configurar el navegador.  
+El nombre del archivo puede cambiar.
 
 ## Servidor HTTPS WebXR
 
