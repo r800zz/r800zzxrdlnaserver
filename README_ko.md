@@ -3,7 +3,7 @@
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
 ### Ver 0.81 : 첫 실행 오류에 대한 대책. (설치 프로그램에서 실행하는 기능을 비활성화했습니다.)
-###Ver 0.8 : GPU 인식 문제를 수정하려고 했습니다. 어느 정도 개선되었는지는 아직 알 수 없습니다.
+### Ver 0.8 : GPU 인식 문제를 수정하려고 했습니다. 어느 정도 개선되었는지는 아직 알 수 없습니다.
 ### Ver 0.8 : VR 비디오 플레이어 r800zzvrplayer for PICO/Meta에서 PC의 파일을 다운로드하는 기능을 추가했습니다.
 ### Ver 0.8 : HTML을 통해 PC의 파일을 다운로드하는 기능을 수정했습니다. VR HMD에서는 r800zzvrplayer를 사용하는 것이 더 편리합니다. PC와 PC 간의 파일 전송에도 사용할 수 있습니다.
 ### Ver 0.5 : WebXR HTTPS 서버를 추가했습니다. (PC에 저장된 WebXR 게임을 플레이할 수 있습니다.)
