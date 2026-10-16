@@ -2,6 +2,9 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 0.9 : 新增 "Direct HTTP" 模式（配合 r800zzvrplayer 1.1），作为 DLNA 的替代方式。
+即使 UDP 1900 端口不可用，也可以通过输入 URL 播放视频和下载文件。
+### Ver 0.9 : 改进了 DLNA 服务器网络适配器的选择优先级。
 ### Ver 0.81 : 针对首次启动错误的对策。（已禁用从安装程序启动。）
 ### Ver 0.8 : 尝试修复了 GPU 识别问题。目前还不清楚改善了多少。
 ### Ver 0.8 : 新增了通过 VR 视频播放器 r800zzvrplayer for PICO/Meta 从 PC 下载文件的功能。
