@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <iphlpapi.h>
 #include <commdlg.h>
 #include <d3d11.h>
 #include <shellapi.h>
@@ -26,6 +27,76 @@
 #include "dlna_server.h"
 #include "webxr_https_server.h"
 #include "../resources/resource.h"
+
+
+int ui_language = 0;
+
+// Order the URL choices without changing server-side adapter handling.
+static void SortDlnaAddresses(std::vector<std::string>& addresses) {
+    if (addresses.size() < 2) return;
+
+    ULONG bufferSize = 0;
+    DWORD result = GetAdaptersInfo(nullptr, &bufferSize);
+    if (result != ERROR_BUFFER_OVERFLOW || bufferSize == 0) return;
+    std::vector<unsigned char> buffer(bufferSize);
+    auto* first = reinterpret_cast<IP_ADAPTER_INFO*>(buffer.data());
+    result = GetAdaptersInfo(first, &bufferSize);
+    if (result != ERROR_SUCCESS) return;
+
+    struct AddressRank {
+        std::string address;
+        int priority;
+    };
+    std::vector<AddressRank> ranks;
+    for (const IP_ADAPTER_INFO* adapter = first; adapter; adapter = adapter->Next) {
+        const std::string description = adapter->Description;
+        std::string lower = description;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const bool virtualAdapter =
+            lower.find("virtual") != std::string::npos ||
+            lower.find("hyper-v") != std::string::npos ||
+            lower.find("wsl") != std::string::npos ||
+            lower.find("vmware") != std::string::npos ||
+            lower.find("virtualbox") != std::string::npos ||
+            lower.find("tap-") != std::string::npos ||
+            lower.find("vpn") != std::string::npos;
+        bool hasGateway = false;
+        for (const IP_ADDR_STRING* gateway = &adapter->GatewayList;
+             gateway; gateway = gateway->Next) {
+            const std::string ip = gateway->IpAddress.String;
+            if (!ip.empty() && ip != "0.0.0.0") {
+                hasGateway = true;
+                break;
+            }
+        }
+        const bool ethernet = adapter->Type == MIB_IF_TYPE_ETHERNET;
+        const bool wifi = adapter->Type == 71; // IF_TYPE_IEEE80211
+        const int priority = virtualAdapter ? 5 :
+            (hasGateway && ethernet ? 0 :
+             hasGateway && wifi ? 1 :
+             ethernet ? 2 : wifi ? 3 : 4);
+        for (const IP_ADDR_STRING* ip = &adapter->IpAddressList;
+             ip; ip = ip->Next) {
+            const std::string value = ip->IpAddress.String;
+            if (!value.empty() && value != "0.0.0.0") {
+                ranks.push_back({value, priority});
+            }
+        }
+    }
+
+    const auto rank = [&](const std::string& address) {
+        int best = 6;
+        for (const auto& entry : ranks) {
+            if (entry.address == address) best = std::min(best, entry.priority);
+        }
+        return best;
+    };
+    std::stable_sort(addresses.begin(), addresses.end(),
+                     [&](const std::string& a, const std::string& b) {
+                         return rank(a) < rank(b);
+                     });
+}
 
 static ID3D11Device* g_pd3dDevice = nullptr;
 static ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
@@ -1414,7 +1485,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                    L"R800ZZDlnaServerWindow", nullptr};
     RegisterClassExW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName,
-                              L"r800zzXRdlnaServer 0.8",
+                              L"r800zzXRdlnaServer 0.9",
                               WS_OVERLAPPEDWINDOW, 100, 100, 820, 720,
                               nullptr, nullptr, wc.hInstance, nullptr);
 
@@ -1589,6 +1660,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
     rebuildSelectedFiles();
     std::vector<std::string> addresses = DlnaServer::GetLocalIPv4Addresses();
+    SortDlnaAddresses(addresses);
     int selected_address = addresses.empty() ? -1 : 0;
     // 0=Alpha packed, 1=Alpha WebM VP9, 2=Chroma Key, 3=OFF.
     bool ai_stream_mode_has_saved_or_user_value = saved_ai_stream_mode >= 0;
@@ -1678,7 +1750,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     std::filesystem::path conversion_input;
     int conversion_mode = 0; // 0=Chroma Key, 1=WebM Alpha, 2=Alpha Packed
     bool resume_prewarm_after_conversion = false;
-    int ui_language = LoadUiLanguage();
+    ui_language = LoadUiLanguage();
 
     bool done = false;
     while (!done) {
@@ -1728,7 +1800,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
         ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
         ImGui::Begin("##r800zzXRdlnaServer", nullptr,
-                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
         // Draw the title and website links manually so every item remains
         // clickable in the non-content title-bar area.
@@ -1885,6 +1958,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (refreshAddressLocked) ImGui::BeginDisabled();
         if (ImGui::Button(uiText.refresh)) {
             addresses = DlnaServer::GetLocalIPv4Addresses();
+            SortDlnaAddresses(addresses);
             selected_address = addresses.empty() ? -1 : 0;
         }
         if (refreshAddressLocked) ImGui::EndDisabled();
@@ -2347,7 +2421,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         ImGui::SameLine();
         ImGui::TextDisabled("Copies the complete log to the Windows clipboard");
 
-        ImGui::BeginChild("log", ImVec2(0, 0), ImGuiChildFlags_Borders);
+        ImGui::BeginChild("log", ImVec2(0, 360), ImGuiChildFlags_Borders);
         for (const auto& line : log_lines) ImGui::TextUnformatted(line.c_str());
         ImGui::EndChild();
 
@@ -2396,4 +2470,5 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     CloseHandle(singleInstanceMutex);
     return 0;
 }
+
 

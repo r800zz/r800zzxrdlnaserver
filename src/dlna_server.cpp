@@ -31,6 +31,8 @@ extern "C" {
 #include <libavutil/mathematics.h>
 }
 
+extern int ui_language;
+
 namespace {
 
 std::string SanitizeWorkerLog(std::string s) {
@@ -58,6 +60,32 @@ constexpr const char* kMulticastAddress = "239.255.255.250";
 constexpr uint16_t kSsdpPort = 1900;
 constexpr uint16_t kFirstHttpPort = 49152;
 constexpr uint16_t kLastHttpPort = 49172;
+
+struct SsdpUiText {
+    const char* running;
+    const char* statusError;
+    const char* logError;
+};
+
+const SsdpUiText& GetSsdpUiText(int language) {
+    static const SsdpUiText strings[] = {
+        {"Running", "Running (r800zzvrplayer \"Direct HTTP\" only. Error: SSDP port 1900)",
+         "Error: SSDP port 1900 unavailable. r800zzvrplayer \"Direct HTTP\" access remains available."},
+        {"Работает", "Работает (только r800zzvrplayer \"Direct HTTP\". Ошибка: SSDP порт 1900)",
+         "Ошибка: порт SSDP 1900 недоступен. Доступ через r800zzvrplayer \"Direct HTTP\" сохранён."},
+        {"En ejecución", "Activo (solo r800zzvrplayer \"Direct HTTP\". Error: SSDP puerto 1900)",
+         "Error: puerto SSDP 1900 no disponible. Sigue disponible r800zzvrplayer \"Direct HTTP\"."},
+        {"กำลังทำงาน", "ทำงาน (เฉพาะ r800zzvrplayer \"Direct HTTP\". ผิดพลาด: SSDP พอร์ต 1900)",
+         "ข้อผิดพลาด: พอร์ต SSDP 1900 ใช้งานไม่ได้ ยังใช้ r800zzvrplayer \"Direct HTTP\" ได้"},
+        {"运行中", "运行中（仅r800zzvrplayer \"Direct HTTP\"。错误：SSDP 1900端口）",
+         "错误：SSDP 1900端口不可用。仍可使用r800zzvrplayer \"Direct HTTP\"连接。"},
+        {"실행 중", "실행 중 (r800zzvrplayer \"Direct HTTP\" 전용. 오류: SSDP 1900 포트)",
+         "오류: SSDP 1900 포트를 사용할 수 없습니다. r800zzvrplayer \"Direct HTTP\" 연결은 가능합니다."},
+        {"実行中", "実行中（r800zzvrplayer \"Direct HTTP\"のみ。エラー：SSDP 1900ポート）",
+         "エラー: SSDPポート1900が使用できません。r800zzvrplayerの\"Direct HTTP\"接続は利用できます。"}
+    };
+    return strings[std::clamp(language, 0, 6)];
+}
 
 // Must match the realtime MPEG-TS muxrate configured in r800zz_ai_worker.
 // Generic clients use this finite byte space; r800zzvrplayer does not.
@@ -2219,16 +2247,14 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
         SetStatus("Could not open an HTTP port.");
         return false;
     }
-    if (!SetupSsdpSocket()) {
-        closesocket(http_listen_socket_);
-        http_listen_socket_ = INVALID_SOCKET;
-        StopResidentAiWorker();
-        SetStatus("Could not open SSDP port 1900. Check firewall/network settings.");
-        return false;
+    const bool ssdp_available = SetupSsdpSocket();
+    const SsdpUiText& ssdpText = GetSsdpUiText(ui_language);
+    if (!ssdp_available) {
+        // Keep HTTP and UPnP control available for clients using a direct URL.
+        AddLog(ssdpText.logError);
     }
-
     running_ = true;
-    SetStatus("Running");
+    SetStatus(ssdp_available ? ssdpText.running : ssdpText.statusError);
     AddLog("DLNA server started: http://" + advertised_ip_ + ":" +
            std::to_string(http_port_) + "/media/<id>");
     AddLog(std::string(video_files_only_ ? "Video files: " : "Shared files: ") +
@@ -2241,8 +2267,10 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
     }
 
     http_thread_ = std::thread(&DlnaServer::HttpLoop, this);
-    ssdp_thread_ = std::thread(&DlnaServer::SsdpLoop, this);
-    SendAliveNotifications();
+    if (ssdp_available) {
+        ssdp_thread_ = std::thread(&DlnaServer::SsdpLoop, this);
+        SendAliveNotifications();
+    }
     return true;
 }
 
@@ -2360,6 +2388,16 @@ std::string DlnaServer::BaseUrl() const {
 
 std::string DlnaServer::Status() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
+    // Translate server startup status using the currently selected UI language.
+    for (int language = 0; language < 7; ++language) {
+        const SsdpUiText& text = GetSsdpUiText(language);
+        if (status_ == text.statusError) {
+            return GetSsdpUiText(ui_language).statusError;
+        }
+        if (status_ == text.running) {
+            return GetSsdpUiText(ui_language).running;
+        }
+    }
     return status_;
 }
 
@@ -4830,4 +4868,5 @@ std::string DlnaServer::SimpleSoapResponse(const std::string& service,
         << "</s:Body></s:Envelope>";
     return xml.str();
 }
+
 
