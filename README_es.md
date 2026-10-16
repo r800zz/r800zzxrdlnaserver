@@ -2,7 +2,10 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
-### Ver 0.81 : Medida contra el error del primer inicio. (Se ha deshabilitado el inicio desde el instalador.)
+### Ver 0.9 : Se ha añadido un nuevo modo "Direct HTTP" (con r800zzvrplayer 1.1) como alternativa a DLNA.
+Permite reproducir vídeos y descargar archivos introduciendo una URL, incluso si el puerto UDP 1900 no está disponible.
+### Ver 0.9 : Se ha mejorado la prioridad de selección de los adaptadores de red del servidor DLNA.
+## Ver 0.81 : Medida contra el error del primer inicio. (Se ha deshabilitado el inicio desde el instalador.)
 ### Ver 0.8 : Se intentó corregir el problema de detección de la GPU. Aún no se sabe cuánto ha mejorado.
 ### Ver 0.8 : Se añadió una función para descargar archivos desde un PC usando el reproductor de vídeo VR r800zzvrplayer for PICO/Meta.
 ### Ver 0.8 : Se corrigió la función para descargar archivos desde un PC mediante HTML. En un VR HMD, r800zzvrplayer es más cómodo. También se puede utilizar para transferir archivos entre PCs.
