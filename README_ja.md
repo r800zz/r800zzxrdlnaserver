@@ -2,6 +2,9 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 0.9 : DLNAの代替として新モード "Direct HTTP"（r800zzvrplayer 1.1用）を追加。
+UDPポート1900が使用できない環境でも、URLを入力して動画再生やファイルのダウンロードができます。
+### Ver 0.9 : DLNAサーバーのネットワークアダプター選択の優先順位を改善。
 ### Ver 0.81 : 初回起動エラーの対策。(インストーラーからの初回起動を禁止)
 ### Ver 0.8 : GPUの認識問題を直そうとしました。どの程度改善したかはまだ分かりません。
 ### Ver 0.8 : VR動画プレイヤーのr800zzvrplayer for PICO/MetaからPCのファイルをダウンロードする機能を追加しました。
