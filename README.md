@@ -2,6 +2,9 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 0.9 : Added a new "Direct HTTP" mode (with r800zzvrplayer 1.1) as an alternative to DLNA.
+It allows video playback and file downloads by entering a URL, even when UDP port 1900 is unavailable.
+### Ver 0.9 : Improved DLNA server network adapter selection priority.
 ### Ver 0.81 : Countermeasure for the first-launch error. (Launching from the installer is disabled.)
 ### Ver 0.8 : Tried to fix the GPU detection issue. It is not yet known how much it has improved.
 ### Ver 0.8 : Added a feature to download files from a PC using the VR video player r800zzvrplayer for PICO/Meta.
