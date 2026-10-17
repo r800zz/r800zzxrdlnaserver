@@ -50,7 +50,7 @@ The SSDP port is fixed at 1900 and cannot be changed.
 #### Free Up Port 1900
 
 - If port 1900 is blocked by your firewall, allow it.
-- If another application is occupying port 1900, close that application.
+- If you are running software that exclusively occupies port 1900, close it. Windows Media Server and Windows SSDP Discovery Service can share port 1900. It is unclear whether any software actually exists that exclusively occupies port 1900 and prevents sharing.
 
 #### Use a Method That Does Not Require Port 1900
 
