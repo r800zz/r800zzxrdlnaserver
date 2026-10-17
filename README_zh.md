@@ -32,7 +32,8 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 通过 DLNA。  
 无需输入 URL。  
 通过复选框也可以支持视频文件以外的文件。  
-文件名可能会发生变化。
+文件名可能会发生变化。  
+即使 SSDP 1900 端口不可用，r800zzvrplayer 1.1 及更高版本也可以通过点击 "Direct HTTP" 按钮并输入 URL，在不使用 1900 端口的情况下连接。同时支持文件下载。
 
 ### 通过 DLNA 在 PC 与 PC 之间传输文件（从网页浏览器下载）
 
