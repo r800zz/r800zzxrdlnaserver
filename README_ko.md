@@ -32,7 +32,8 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 DLNA를 통해.  
 URL을 입력할 필요가 없습니다.  
 체크박스를 사용하면 동영상 파일 이외의 파일도 지원합니다.  
-파일 이름이 변경될 수 있습니다.
+파일 이름이 변경될 수 있습니다.  
+SSDP 1900 포트를 사용할 수 없는 환경에서도 r800zzvrplayer 1.1 이상에서는 "Direct HTTP" 버튼을 누르고 URL을 입력하면 1900 포트를 사용하지 않고 연결할 수 있습니다. 파일 다운로드도 가능합니다.
 
 ### DLNA를 통한 PC와 PC 간 파일 전송 (웹 브라우저에서 다운로드)
 
