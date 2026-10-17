@@ -42,6 +42,30 @@ Es necesario introducir una URL.
 Puede ser necesario configurar el navegador.  
 El nombre del archivo puede cambiar.
 
+### Si aparece un error del puerto SSDP 1900 al iniciar el servidor DLNA
+
+DLNA utiliza SSDP en el puerto 1900 para descubrir los nombres de los servidores DLNA.
+El puerto SSDP está fijado en 1900 y no se puede cambiar.
+
+#### Liberar el puerto 1900
+
+- Si el firewall bloquea el puerto 1900, permite su uso.
+- Si otra aplicación está ocupando el puerto 1900, cierra esa aplicación.
+
+#### Utilizar un método que no requiera el puerto 1900
+
+A partir de la versión 0.9, hay disponible un método alternativo que no utiliza el puerto 1900.
+Es necesario introducir la URL del servidor (por ejemplo, `192.168.1.102:49152`).
+El cliente es r800zzvrplayer versión 1.1 o posterior.
+
+1. En Windows, inicia el servidor DLNA con r800zzXRdlnaServer versión 0.9 o posterior. Ignora el error del puerto 1900.
+2. En PICO/Meta, pulsa el botón **"Direct HTTP"** de r800zzvrplayer versión 1.1 o posterior.
+3. En r800zzvrplayer, introduce la URL del servidor DLNA que aparece en r800zzXRdlnaServer en Windows (por ejemplo, `192.168.1.102:49152`).
+4. Pulsa **"Connect"**. Una vez establecida la conexión, pulsa **"Close"**.
+
+Si no puedes conectarte, es posible que hayas seleccionado una URL incorrecta del servidor DLNA entre las varias disponibles en Windows, o que hayas escrito mal la URL.
+
+
 ## Servidor HTTPS WebXR
 
 <a href="./jpeg/webxrserver_es.jpeg" target="_blank">
