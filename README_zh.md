@@ -42,6 +42,30 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 可能需要更改浏览器设置。  
 文件名可能会发生变化。
 
+### 启动 DLNA 服务器时出现 SSDP 1900 端口错误
+
+DLNA 使用 SSDP 的 1900 端口来发现 DLNA 服务器名称。
+SSDP 端口固定为 1900，无法更改。
+
+#### 释放 1900 端口
+
+- 如果防火墙阻止使用 1900 端口，请允许该端口。
+- 如果其他软件占用了 1900 端口，请关闭该软件。
+
+#### 使用不需要 1900 端口的连接方式
+
+从 Ver. 0.9 开始，提供不使用 1900 端口的替代连接方式。
+需要输入服务器 URL（例如 `192.168.1.102:49152`）。
+客户端为 r800zzvrplayer Ver. 1.1 或更高版本。
+
+1. 在 Windows 上使用 r800zzXRdlnaServer Ver. 0.9 或更高版本启动 DLNA 服务器。忽略 1900 端口错误。
+2. 在 PICO/Meta 上，点击 r800zzvrplayer Ver. 1.1 或更高版本中的 **"Direct HTTP"** 按钮。
+3. 在 r800zzvrplayer 中，输入 Windows 上 r800zzXRdlnaServer 显示的 DLNA 服务器 URL（例如 `192.168.1.102:49152`）。
+4. 点击 **"Connect"**。连接成功后，点击 **"Close"**。
+
+如果无法连接，可能是 Windows 上有多个 DLNA 服务器 URL，选择了错误的 URL，或者输入 URL 时出现了错误。
+
+
 ## WebXR HTTPS 服务器
 
 <a href="./jpeg/webxrserver_zh.jpeg" target="_blank">
