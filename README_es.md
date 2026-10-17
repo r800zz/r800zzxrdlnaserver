@@ -32,7 +32,8 @@ https://github.com/r800zz/r800zzxrdlnaserver/releases/latest
 A través de DLNA.  
 No es necesario introducir una URL.  
 Mediante una casilla de verificación, también se admiten archivos que no sean de vídeo.  
-El nombre del archivo puede cambiar.
+El nombre del archivo puede cambiar.  
+Aunque el puerto SSDP 1900 no esté disponible, r800zzvrplayer 1.1 y versiones posteriores permite conectarse sin utilizar el puerto 1900 mediante el botón "Direct HTTP" e introduciendo una URL. También permite descargar archivos.
 
 ### Transferencia de archivos entre PCs mediante DLNA (descarga desde un navegador web)
 
