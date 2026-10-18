@@ -169,6 +169,40 @@ bool RvmOrtGpu::initialize(const std::wstring& modelPath, int width, int height,
     }
 }
 
+bool RvmOrtGpu::resize(int width, int height, cudaStream_t stream,
+                       std::string& error) {
+    if (width <= 0 || height <= 0 || !impl_->session) {
+        error = "RVM resize: invalid dimensions or uninitialized session";
+        return false;
+    }
+    if (width == impl_->width && height == impl_->height) return true;
+
+    const size_t pixels = static_cast<size_t>(width) * static_cast<size_t>(height);
+    if (pixels > SIZE_MAX / sizeof(uint16_t)) {
+        error = "RVM resize: dimensions overflow";
+        return false;
+    }
+    void* newAlpha = nullptr;
+    const size_t newBytes = pixels * sizeof(uint16_t);
+    const cudaError_t alloc = cudaMalloc(&newAlpha, newBytes);
+    if (alloc != cudaSuccess) {
+        error = std::string("RVM resize alpha allocation failed: ") + cudaGetErrorString(alloc);
+        return false;
+    }
+    const cudaError_t sync = cudaStreamSynchronize(stream);
+    if (sync != cudaSuccess) {
+        cudaFree(newAlpha);
+        error = std::string("RVM resize synchronization failed: ") + cudaGetErrorString(sync);
+        return false;
+    }
+    if (impl_->pha) cudaFree(impl_->pha);
+    impl_->pha = newAlpha;
+    impl_->phaBytes = newBytes;
+    impl_->width = width;
+    impl_->height = height;
+    return true;
+}
+
 struct RvmOrtCpu::Impl {
     Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "r800zz-rvm-cpu"};
     Ort::SessionOptions options;
@@ -384,3 +418,4 @@ bool RvmOrtGpu::run(const void* srcFp16Nchw, cudaStream_t,
         return false;
     }
 }
+

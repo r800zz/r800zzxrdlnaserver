@@ -1,4 +1,6 @@
 #include "r800zz_dml_backend.h"
+#include "r800zz_playback_timing_20261017.h"
+#include "r800zz_pipeline_common_20261017.h"
 #include "rvm_ort_dml.h"
 
 #include <windows.h>
@@ -48,7 +50,6 @@ extern "C" {
 
 namespace {
 
-constexpr double kDropLagSeconds = 0.120;
 
 std::string fferr(int code) {
     char buf[AV_ERROR_MAX_STRING_SIZE]{};
@@ -471,41 +472,11 @@ struct Pipeline {
     }
 
     bool initInput(std::string& error) {
-        const std::string inputUtf8 = args.input.u8string();
-        int rc = avformat_open_input(&inFmt, inputUtf8.c_str(), nullptr, nullptr);
-        if (rc < 0) { error = "avformat_open_input: " + fferr(rc); return false; }
-        rc = avformat_find_stream_info(inFmt, nullptr);
-        if (rc < 0) { error = "avformat_find_stream_info: " + fferr(rc); return false; }
-
-        videoIndex = av_find_best_stream(inFmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-        if (videoIndex < 0) { error = "No video stream"; return false; }
-        inVideo = inFmt->streams[videoIndex];
-        width = inVideo->codecpar->width;
-        height = inVideo->codecpar->height;
-        frameRate = av_guess_frame_rate(inFmt, inVideo, nullptr);
-        if (frameRate.num <= 0 || frameRate.den <= 0) frameRate = AVRational{30, 1};
-
-        audioIndex = av_find_best_stream(inFmt, AVMEDIA_TYPE_AUDIO, -1, videoIndex, nullptr, 0);
-        if (audioIndex >= 0) inAudio = inFmt->streams[audioIndex];
-
-        int64_t durationMs = 0;
-        if (inFmt->duration != AV_NOPTS_VALUE && inFmt->duration > 0) {
-            durationMs = av_rescale_q(inFmt->duration, AV_TIME_BASE_Q, AVRational{1, 1000});
-        }
-        logLine("META durationMs=" + std::to_string(durationMs));
-
-        if (args.startMs > 0) {
-            const int64_t baseUs = inFmt->start_time != AV_NOPTS_VALUE ? inFmt->start_time : 0;
-            requestedStartTimestampUs = baseUs + args.startMs * 1000LL;
-            rc = avformat_seek_file(
-                inFmt, -1, INT64_MIN, requestedStartTimestampUs, INT64_MAX, AVSEEK_FLAG_BACKWARD);
-            if (rc < 0) {
-                error = "avformat_seek_file startMs=" + std::to_string(args.startMs) + ": " + fferr(rc);
-                return false;
-            }
-            logLine("input seek requested startMs=" + std::to_string(args.startMs));
-        }
-        return true;
+        return r800zz::openVideoInput(
+            args.input, args.startMs, inFmt, inVideo, inAudio,
+            videoIndex, audioIndex, width, height, frameRate,
+            requestedStartTimestampUs, error,
+            [](const std::string& message) { logLine(message); });
     }
 
 
@@ -1076,34 +1047,11 @@ struct Pipeline {
     }
 
 
-    double videoSeconds(int64_t pts) const {
-        if (pts == AV_NOPTS_VALUE || firstVideoPts == AV_NOPTS_VALUE) return 0.0;
-        return static_cast<double>(pts - firstVideoPts) * av_q2d(inVideo->time_base);
-    }
-
     bool paceOrDrop(int64_t pts) {
-        if (args.offlineConvert) return false;
-        if (pts == AV_NOPTS_VALUE) return false;
-        if (firstVideoPts == AV_NOPTS_VALUE) {
-            firstVideoPts = pts;
-            return false;
-        }
-        // The cold/warm-up cost of the first RVM frame must not count as
-        // playback time. The clock starts only after that frame is complete.
-        if (!playbackClockStarted) return false;
-        const double src = videoSeconds(pts);
-        const auto now = std::chrono::steady_clock::now();
-        const double wall = std::chrono::duration<double>(now - wallStart).count();
-        const double delta = src - wall;
-        if (delta > 0.002) {
-            std::this_thread::sleep_for(std::chrono::duration<double>(delta));
-            return false;
-        }
-        if (delta < -kDropLagSeconds) {
-            ++dropped;
-            return true;
-        }
-        return false;
+        return r800zz::paceOrDropFrame(
+            args.offlineConvert, pts, firstVideoPts,
+            playbackClockStarted, inVideo->time_base,
+            wallStart, dropped);
     }
 
     bool writeEncodedPackets(std::string& error) {
@@ -2341,8 +2289,6 @@ struct Pipeline {
     }
 
     bool run(std::string& error) {
-        std::unique_ptr<AVPacket, AvPacketCloser> pkt(av_packet_alloc());
-        if (!pkt) { error = "av_packet_alloc failed"; return false; }
 
         if (args.previewOnly) {
             logLine("Standalone preview is not used by the DirectML worker");
@@ -2374,34 +2320,25 @@ struct Pipeline {
             logLine(oss.str());
         }
 
-        for (;;) {
-            if (cancelFlag && cancelFlag->load()) {
-                logLine("stream cancellation requested");
-                return true;
-            }
-            int rc = av_read_frame(inFmt, pkt.get());
-            if (rc == AVERROR_EOF) break;
-            if (rc < 0) { error = "av_read_frame: " + fferr(rc); return false; }
-
-            if (pkt->stream_index == videoIndex) {
-                ++videoPacketsRead;
-                if (videoPacketsRead == 1) {
-                    std::ostringstream v;
-                    v << "first-frame stage=demux_video_packet bytes=" << pkt->size
-                      << " pts=" << pkt->pts << " dts=" << pkt->dts;
-                    logLine(v.str());
-                }
-                rc = avcodec_send_packet(dec, pkt.get());
-                av_packet_unref(pkt.get());
-                if (rc < 0 && rc != AVERROR(EAGAIN)) { error = "avcodec_send_packet: " + fferr(rc); return false; }
-                if (!drainDecoder(error)) return false;
-            } else if (!args.previewOnly && audioIndex >= 0 && pkt->stream_index == audioIndex && outAudio) {
-                if (!queueAudioPacket(pkt.get(), error)) return false;
-                av_packet_unref(pkt.get());
-            } else {
-                av_packet_unref(pkt.get());
-            }
+        if (!r800zz::readVideoPackets(
+                inFmt, videoIndex, audioIndex, args.previewOnly,
+                outAudio != nullptr, cancelFlag, videoPacketsRead, error,
+                [](const std::string& message) { logLine(message); },
+                [&](AVPacket* packet, std::string& failure) -> bool {
+                    const int rc = avcodec_send_packet(dec, packet);
+                    if (rc < 0 && rc != AVERROR(EAGAIN)) {
+                        failure = "avcodec_send_packet: " + fferr(rc);
+                        return false;
+                    }
+                    return drainDecoder(failure);
+                },
+                [&](AVPacket* packet, std::string& failure) -> bool {
+                    return queueAudioPacket(packet, failure);
+                })) {
+            return false;
         }
+
+        if (cancelFlag && cancelFlag->load()) return true;
 
         int rc = avcodec_send_packet(dec, nullptr);
         if (rc < 0 && rc != AVERROR_EOF) {
@@ -2707,6 +2644,8 @@ struct R800zzDmlResidentSession {
     Args base;
     std::unique_ptr<RvmOrt> rvm;
     AVBufferRef* d3d11Device = nullptr;
+    int width = 0;
+    int height = 0;
 };
 
 R800zzDmlResidentSession* R800zzCreateDmlResidentSession(
@@ -2771,6 +2710,8 @@ R800zzDmlResidentSession* R800zzCreateDmlResidentSession(
     }
 
     session->base = warm.args;
+    session->width = warm.width;
+    session->height = warm.height;
     session->rvm = std::move(warm.ownedRvm);
     session->d3d11Device = warm.d3d11Device;
     warm.rvm = nullptr;
@@ -2822,13 +2763,31 @@ int R800zzRunDmlResidentStream(
         error = "unknown output mode: " + output_mode;
         return 10;
     }
-    p.externalRvm = session->rvm.get();
     p.externalD3d11Device = session->d3d11Device;
     p.outputHandle = output;
     p.cancelFlag = cancel_flag;
 
-    if (!p.initInput(error) ||
-        !p.initD3d11Decoder(error) ||
+    if (!p.initInput(error)) return 10;
+    if (p.width != session->width || p.height != session->height) {
+        if (session->base.backend == RvmBackend::CPU) {
+            if (!session->rvm->resizeCpu(p.width, p.height, error)) return 10;
+        } else {
+            // DirectML GPU allocations and interop textures are dimension-specific.
+            // Rebuild on a size change, while keeping the already-created D3D11 device.
+            // Do not discard the working session before the replacement is ready.
+            auto next = std::make_unique<RvmOrt>();
+            if (!next->initialize(session->base.model.wstring(), p.width, p.height,
+                                  session->base.downsample, RvmBackend::DirectML,
+                                  session->base.device, error)) return 10;
+            session->rvm.swap(next);
+        }
+        session->width = p.width;
+        session->height = p.height;
+        logLine("resident RVM resolution changed backend=" +
+                std::string(session->base.backend == RvmBackend::CPU ? "cpu" : "dml"));
+    }
+    p.externalRvm = session->rvm.get();
+    if (!p.initD3d11Decoder(error) ||
         !p.initRvm(error) ||
         !p.initEncoderAndMuxer(error) ||
         !p.initPreview(error)) {
@@ -2984,4 +2943,5 @@ int RunR800zzDmlBackend(int argc, char** argv) {
     for (auto& value : wideArgs) wideArgv.push_back(value.data());
     return runDmlBackendWide(argc, wideArgv.data());
 }
+
 

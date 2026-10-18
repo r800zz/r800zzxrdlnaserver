@@ -80,9 +80,11 @@ public:
                             void* d3d11DestinationTexture = nullptr,
                             int d3d11DestinationArraySlice = 0);
 
+    bool resizeCpu(int width, int height, std::string& error);
     bool resetState(std::string& error);
 
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+

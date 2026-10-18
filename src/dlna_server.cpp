@@ -32,6 +32,13 @@ extern "C" {
 }
 
 extern int ui_language;
+extern std::atomic<int> g_selected_ai_mode;
+
+static AiOutputMode DecodeAiOutputMode(int mode) {
+    if (mode == 1) return AiOutputMode::WebmVp9Alpha;
+    if (mode == 2) return AiOutputMode::ChromaKeyHevc;
+    return AiOutputMode::AlphaPackedHevc;
+}
 
 namespace {
 
@@ -114,6 +121,58 @@ std::atomic<uint64_t> g_ai_stream_generation{0};
 // instead of flattening every descendant file into object 0.
 std::mutex g_last_find_files_root_mutex;
 std::filesystem::path g_last_find_files_root;
+
+// Downloader only: enumerate every regular file without media-type filtering.
+std::vector<std::filesystem::path> DownloadFilesInRoot(
+        const std::filesystem::path& root) {
+    std::vector<std::filesystem::path> files;
+    std::error_code ec;
+    if (root.empty() || !std::filesystem::is_directory(root, ec)) return files;
+    std::filesystem::recursive_directory_iterator it(
+        root, std::filesystem::directory_options::skip_permission_denied, ec);
+    const std::filesystem::recursive_directory_iterator end;
+    while (it != end) {
+        std::error_code entryError;
+        if (it->is_regular_file(entryError) && !entryError)
+            files.push_back(it->path());
+        it.increment(ec);
+        if (ec) ec.clear();
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+bool DecodeDownloadHex(std::string_view hex, std::string& decoded) {
+    if (hex.empty() || (hex.size() % 2) != 0) return false;
+    auto digit = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    decoded.clear();
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        int high = digit(hex[i]), low = digit(hex[i + 1]);
+        if (high < 0 || low < 0) return false;
+        decoded.push_back(static_cast<char>((high << 4) | low));
+    }
+    return decoded.find('\0') == std::string::npos;
+}
+
+bool DownloadPathInRoot(const std::filesystem::path& root,
+                        const std::filesystem::path& path) {
+    std::error_code ec;
+    const auto canonicalRoot = std::filesystem::weakly_canonical(root, ec);
+    if (ec) return false;
+    const auto canonicalFile = std::filesystem::weakly_canonical(path, ec);
+    if (ec) return false;
+    const auto relative = canonicalFile.lexically_relative(canonicalRoot);
+    if (relative.empty() || relative.is_absolute()) return false;
+    for (const auto& component : relative)
+        if (component == L"..") return false;
+    return std::filesystem::is_regular_file(canonicalFile, ec) && !ec;
+}
+
 
 bool LoadGenericTailProbeCache(const std::string& key,
                                uint64_t expectedBytes,
@@ -2124,16 +2183,10 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
     }
 
     advertised_ip_ = advertised_ip;
-    ai_passthrough_.store(ai_passthrough, std::memory_order_relaxed);
-    {
-        std::lock_guard<std::mutex> lock(ai_mode_mutex_);
-        selected_ai_passthrough_ = ai_passthrough;
-        ai_passthrough_change_pending_ = false;
-        ai_output_mode_ = ai_output_mode;
-        active_ai_output_mode_ = ai_output_mode;
-        ai_output_mode_change_pending_ = false;
-        active_ai_media_id_ = 0;
-    }
+    // Server startup initializes the playback snapshot; it does not modify the UI selection.
+    active_ai_mode_.store(g_selected_ai_mode.load(std::memory_order_relaxed),
+                          std::memory_order_relaxed);
+    active_ai_media_id_ = 0;
     ai_backend_ = ai_backend;
     directml_device_ = directml_device;
     video_files_only_ = video_files_only;
@@ -2144,7 +2197,7 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
     const auto firstVideo = std::find_if(
         media_items_.begin(), media_items_.end(),
         [](const MediaItem& item) { return item.is_video; });
-    if (ai_passthrough_.load(std::memory_order_relaxed) &&
+    if ((active_ai_mode_.load(std::memory_order_relaxed) != 3) &&
         firstVideo != media_items_.end()) {
         SetStatus("Starting AI Passthrough...");
         AddLog("AI Passthrough startup: initializing backend=" +
@@ -2261,8 +2314,8 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
            std::to_string(media_items_.size()));
     AddLog("DLNA folders: " + std::to_string(directory_items_.size()));
     AddLog(std::string("AI Passthrough: ") +
-           (ai_passthrough_.load(std::memory_order_relaxed) ? "ON" : "OFF"));
-    if (ai_passthrough_.load(std::memory_order_relaxed)) {
+           ((active_ai_mode_.load(std::memory_order_relaxed) != 3) ? "ON" : "OFF"));
+    if ((active_ai_mode_.load(std::memory_order_relaxed) != 3)) {
         AddLog("AI Output: " + AiOutputLabel());
     }
 
@@ -2272,47 +2325,6 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
         SendAliveNotifications();
     }
     return true;
-}
-
-void DlnaServer::SetAiPassthroughMode(bool enabled, AiOutputMode mode) {
-    bool pending = false;
-    {
-        std::lock_guard<std::mutex> lock(ai_mode_mutex_);
-        selected_ai_passthrough_ = enabled;
-        ai_output_mode_ = mode;
-
-        if (!running_.load()) {
-            ai_passthrough_.store(enabled, std::memory_order_relaxed);
-            active_ai_output_mode_ = mode;
-            ai_passthrough_change_pending_ = false;
-            ai_output_mode_change_pending_ = false;
-        } else {
-            ai_passthrough_change_pending_ =
-                enabled != ai_passthrough_.load(std::memory_order_relaxed);
-            ai_output_mode_change_pending_ =
-                enabled && mode != active_ai_output_mode_;
-        }
-        pending = ai_passthrough_change_pending_ ||
-                  ai_output_mode_change_pending_;
-    }
-
-    if (!enabled) {
-        AddLog(std::string("AI Passthrough ") +
-               (pending ? "pending: OFF" : "selected: OFF"));
-    } else {
-        AddLog(std::string("AI Passthrough ") +
-               (pending ? "pending: ON, " : "selected: ON, ") +
-               AiOutputModeDisplayName(mode));
-    }
-}
-
-void DlnaServer::SetAiOutputMode(AiOutputMode mode) {
-    bool enabled = true;
-    {
-        std::lock_guard<std::mutex> lock(ai_mode_mutex_);
-        enabled = selected_ai_passthrough_;
-    }
-    SetAiPassthroughMode(enabled, mode);
 }
 
 void DlnaServer::Stop() {
@@ -2363,15 +2375,7 @@ void DlnaServer::Stop() {
     // prepared/failed GPU state alive after Stop(); the next Start() must retry
     // initialization from a clean state.
     StopResidentAiWorker();
-    {
-        std::lock_guard<std::mutex> lock(ai_mode_mutex_);
-        active_ai_media_id_ = 0;
-        ai_passthrough_.store(selected_ai_passthrough_,
-                              std::memory_order_relaxed);
-        active_ai_output_mode_ = ai_output_mode_;
-        ai_passthrough_change_pending_ = false;
-        ai_output_mode_change_pending_ = false;
-    }
+    active_ai_media_id_ = 0;
 }
 
 std::string DlnaServer::AdvertisedIp() const {
@@ -2487,10 +2491,7 @@ void DlnaServer::HandleWorkerDiagnosticLine(const std::string& line,
             ? AiBackendDisplayName(ai_backend_, directml_device_)
             : gpu;
         AiOutputMode selectedMode;
-        {
-            std::lock_guard<std::mutex> lock(ai_mode_mutex_);
-            selectedMode = ai_output_mode_;
-        }
+        selectedMode = DecodeAiOutputMode(active_ai_mode_.load(std::memory_order_relaxed));
         const std::string displayMode = mode.empty()
             ? AiOutputModeDisplayName(selectedMode)
             : mode;
@@ -2831,7 +2832,7 @@ void DlnaServer::HandleHttpClient(SOCKET client) {
     // Only our own player is a guaranteed compatibility exception. All other
     // clients use the generic DLNA/HTTP virtual-range experiment.
     g_r800zz_vrplayer_request = IsR800zzVrPlayerRequest(request);
-    if (ai_passthrough_.load(std::memory_order_relaxed) &&
+    if ((active_ai_mode_.load(std::memory_order_relaxed) != 3) &&
         (routePathLower == "/contentdirectory/control" ||
          routePathLower == "/connectionmanager/control" ||
          routePathLower == "/media" ||
@@ -2873,24 +2874,36 @@ void DlnaServer::HandleHttpClient(SOCKET client) {
         AddLog(method + " " + routePath + " -> 200 PC-to-HMD page");
     } else if ((method == "GET" || method == "HEAD") &&
         routePathLower == "/-_-9213--api/files") {
+        std::filesystem::path downloadRoot;
+        {
+            std::lock_guard<std::mutex> lock(g_last_find_files_root_mutex);
+            downloadRoot = g_last_find_files_root;
+        }
+        const auto downloadFiles = DownloadFilesInRoot(downloadRoot);
         std::ostringstream json;
         json << "[\n";
-        for (size_t i = 0; i < media_items_.size(); ++i) {
-            const MediaItem& item = media_items_[i];
+        for (size_t i = 0; i < downloadFiles.size(); ++i) {
+            const auto& path = downloadFiles[i];
+            const auto relative = path.lexically_relative(downloadRoot);
+            std::error_code sizeError;
+            const auto size = std::filesystem::file_size(path, sizeError);
+            const std::string relativeUtf8 = WideToUtf8(relative.wstring());
             if (i != 0) json << ",\n";
-            json << "  {\"id\":" << item.id
+            json << "  {\"id\":" << (i + 1)
                  << ",\"name\":\""
-                 << JsonEscape(WideToUtf8(item.path.filename().wstring())) << "\""
-                 << ",\"url\":\"" << JsonEscape(MediaUrl(item)) << "\""
+                 << JsonEscape(WideToUtf8(path.filename().wstring())) << "\""
                  << ",\"downloadUrl\":\"http://"
                  << JsonEscape(advertised_ip_) << ':' << http_port_
-                 << "/-_-9213--api/download/" << item.id << '/'
-                 << UrlEncodePathSegment(WideToUtf8(item.path.filename().wstring()))
+                 << "/-_-9213--api/download-all/" << HexEncode(relativeUtf8)
                  << "\""
-                 << ",\"size\":" << item.size
-                 << ",\"parentId\":\"" << JsonEscape(item.parent_id) << "\""
-                 << ",\"isVideo\":" << (item.is_video ? "true" : "false")
-                 << "}";
+                 << ",\"url\":\"http://"
+                 << JsonEscape(advertised_ip_) << ':' << http_port_
+                 << "/-_-9213--api/download-all/" << HexEncode(relativeUtf8)
+                 << "\""
+                 << ",\"size\":" << (sizeError ? 0 : size)
+                 << ",\"parentId\":\""
+                 << JsonEscape(WideToUtf8(relative.parent_path().wstring())) << "\""
+                 << ",\"isVideo\":false}";
         }
         json << "\n]\n";
         const std::string body = json.str();
@@ -2907,10 +2920,11 @@ void DlnaServer::HandleHttpClient(SOCKET client) {
         if (method != "HEAD") response << body;
         SendAll(client, response.str());
         AddLog(method + " /-_-9213--api/files -> 200 files=" +
-               std::to_string(media_items_.size()));
+               std::to_string(downloadFiles.size()));
     } else if (method == "OPTIONS" &&
                (routePathLower == "/-_-9213--api/files" ||
-                routePathLower.rfind("/-_-9213--api/download/", 0) == 0)) {
+                routePathLower.rfind("/-_-9213--api/download/", 0) == 0 ||
+                routePathLower.rfind("/-_-9213--api/download-all/", 0) == 0)) {
         SendAll(client,
                 "HTTP/1.1 204 No Content\r\n"
                 "Access-Control-Allow-Origin: *\r\n"
@@ -2919,20 +2933,47 @@ void DlnaServer::HandleHttpClient(SOCKET client) {
                 "Content-Length: 0\r\n"
                 "Connection: close\r\n\r\n");
     } else if ((method == "GET" || method == "HEAD") &&
-               routePathLower.rfind("/-_-9213--api/download/", 0) == 0) {
+               (routePathLower.rfind("/-_-9213--api/download/", 0) == 0 ||
+                routePathLower.rfind("/-_-9213--api/download-all/", 0) == 0)) {
+        const bool allFilesDownload =
+            routePathLower.rfind("/-_-9213--api/download-all/", 0) == 0;
         constexpr std::string_view prefix = "/-_-9213--api/download/";
         std::string idText = routePath.substr(prefix.size());
         const size_t slash = idText.find('/');
         if (slash != std::string::npos) idText.resize(slash);
 
+        MediaItem standaloneItem;
         const MediaItem* item = nullptr;
-        try {
-            const unsigned long parsed = std::stoul(idText);
-            if (parsed > 0 && parsed <= media_items_.size()) {
-                const MediaItem& candidate = media_items_[parsed - 1];
-                if (candidate.id == parsed) item = &candidate;
+        if (allFilesDownload) {
+            constexpr std::string_view allPrefix = "/-_-9213--api/download-all/";
+            std::string relativeUtf8;
+            std::filesystem::path root;
+            {
+                std::lock_guard<std::mutex> lock(g_last_find_files_root_mutex);
+                root = g_last_find_files_root;
             }
-        } catch (...) {
+            if (DecodeDownloadHex(routePath.substr(allPrefix.size()), relativeUtf8) &&
+                !root.empty()) {
+                const auto relativePath = std::filesystem::u8path(relativeUtf8);
+                if (!relativePath.is_absolute()) {
+                    const auto candidate = root / relativePath;
+                    if (DownloadPathInRoot(root, candidate)) {
+                        standaloneItem.path = candidate;
+                        std::error_code ec;
+                        standaloneItem.size = std::filesystem::file_size(candidate, ec);
+                        if (!ec) item = &standaloneItem;
+                    }
+                }
+            }
+        } else {
+            try {
+                const unsigned long parsed = std::stoul(idText);
+                if (parsed > 0 && parsed <= media_items_.size()) {
+                    const MediaItem& candidate = media_items_[parsed - 1];
+                    if (candidate.id == parsed) item = &candidate;
+                }
+            } catch (...) {
+            }
         }
 
         if (!item) {
@@ -3125,50 +3166,25 @@ void DlnaServer::HandleHttpClient(SOCKET client) {
                 }
             }
 
-            bool fileLoadTrigger = false;
-            bool zeroSeekTrigger = false;
             bool stateApplied = false;
-            bool appliedEnabled = ai_passthrough_.load(std::memory_order_relaxed);
-            AiOutputMode appliedMode = AiOutputMode::AlphaPackedHevc;
-            {
-                std::lock_guard<std::mutex> lock(ai_mode_mutex_);
-                fileLoadTrigger = active_ai_media_id_ == 0 ||
-                                  active_ai_media_id_ != item->id;
-                zeroSeekTrigger = !fileLoadTrigger && explicitZeroSeek;
-
-                if (fileLoadTrigger) {
-                    active_ai_media_id_ = item->id;
-                }
-
-                if ((fileLoadTrigger || zeroSeekTrigger) &&
-                    (ai_passthrough_change_pending_ ||
-                     ai_output_mode_change_pending_)) {
-                    ai_passthrough_.store(selected_ai_passthrough_,
-                                          std::memory_order_relaxed);
-                    if (selected_ai_passthrough_) {
-                        active_ai_output_mode_ = ai_output_mode_;
-                    }
-                    ai_passthrough_change_pending_ = false;
-                    ai_output_mode_change_pending_ = false;
-                    appliedEnabled = selected_ai_passthrough_;
-                    appliedMode = active_ai_output_mode_;
-                    stateApplied = true;
-                }
+            int appliedMode = active_ai_mode_.load(std::memory_order_relaxed);
+            const bool differentFile = active_ai_media_id_ == 0 ||
+                                       active_ai_media_id_ != item->id;
+            if (differentFile || explicitZeroSeek) {
+                active_ai_media_id_ = item->id;
+                appliedMode = g_selected_ai_mode.load(std::memory_order_relaxed);
+                active_ai_mode_.store(appliedMode, std::memory_order_relaxed);
+                stateApplied = true;
             }
-
             if (stateApplied) {
-                const std::string boundary =
-                    fileLoadTrigger ? "file load" : "zero seek";
-                if (appliedEnabled) {
-                    AddLog("AI Passthrough applied at " + boundary +
-                           ": ON, " + AiOutputModeDisplayName(appliedMode) + ".");
-                } else {
-                    AddLog("AI Passthrough applied at " + boundary + ": OFF.");
-                }
+                AddLog(std::string("AI Passthrough playback: ") +
+                       (appliedMode != 3
+                           ? "ON, " + AiOutputModeDisplayName(DecodeAiOutputMode(appliedMode))
+                           : "OFF"));
             }
         }
 
-        if (ai_passthrough_.load(std::memory_order_relaxed) && item->is_video) {
+        if ((active_ai_mode_.load(std::memory_order_relaxed) != 3) && item->is_video) {
             // CUDA / DirectML / CPU all use the same DLNA/HTTP/pipe streaming path.
             // Non-video files such as .vrm are always served as their raw bytes.
             HandleAiPassthroughStream(client, method, request, *item);
@@ -3312,10 +3328,7 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
     }
 
     AiOutputMode requestOutputMode = AiOutputMode::AlphaPackedHevc;
-    {
-        std::lock_guard<std::mutex> lock(ai_mode_mutex_);
-        requestOutputMode = active_ai_output_mode_;
-    }
+    requestOutputMode = DecodeAiOutputMode(active_ai_mode_.load(std::memory_order_relaxed));
 
     const auto requestMimeType = [&]() -> const char* {
         return requestOutputMode == AiOutputMode::WebmVp9Alpha
@@ -3334,7 +3347,11 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
     // Generic DLNA/HTTP clients may use the experimental virtual byte range.
     // r800zzvrplayer is the only compatibility exception because its User-Agent
     // and custom X-R800ZZ-Start-Ms behavior are under our control.
-    const bool virtual_range_enabled = !g_r800zz_vrplayer_request;
+    // A transcoded WebM stream has no known byte-addressable output size.
+    // Preserve the existing experimental byte ranges for MPEG-TS only.
+    const bool virtual_range_enabled =
+        !g_r800zz_vrplayer_request &&
+        requestOutputMode != AiOutputMode::WebmVp9Alpha;
     const bool fixed_muxrate_ts =
         requestOutputMode != AiOutputMode::WebmVp9Alpha;
     const uint64_t virtual_total_bytes = virtual_range_enabled
@@ -3875,7 +3892,19 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                     }
                     headers << "EXT:\r\nConnection: close\r\n\r\n";
 
-                    bool sendFailed = !SendAll(client, headers.str());
+                    // Hold the first pipe output for every live AI mode until
+                    // subsequent output is available. Avoid sending a container
+                    // header alone while the first encoded media data is pending.
+                    const bool stageFirstPayload = !virtual_tail_duration_probe;
+                    std::vector<char> initialBytes;
+                    if (stageFirstPayload) {
+                        initialBytes.assign(data.data(), data.data() + firstGot);
+                    }
+                    bool firstPayloadReady = !stageFirstPayload;
+                    bool sendFailed = false;
+                    if (firstPayloadReady) {
+                        sendFailed = !SendAll(client, headers.str());
+                    }
                     uint64_t sentBody = 0;
                     bool virtualBodyComplete = false;
                     std::vector<char> tailProbeBody;
@@ -3921,7 +3950,7 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                         return true;
                     };
 
-                    if (!sendFailed) {
+                    if (!sendFailed && firstPayloadReady) {
                         sendFailed = !sendBodyChunk(
                             data.data(), static_cast<size_t>(firstGot));
                     }
@@ -3963,7 +3992,18 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                             break;
                         }
                         const auto sendStart = std::chrono::steady_clock::now();
-                        if (!sendBodyChunk(data.data(), static_cast<size_t>(got))) {
+                        if (!firstPayloadReady) {
+                            // Preserve byte order across the first two pipe reads.
+                            initialBytes.insert(initialBytes.end(),
+                                                data.data(), data.data() + got);
+                            firstPayloadReady = true;
+                            if (!SendAll(client, headers.str()) ||
+                                !sendBodyChunk(initialBytes.data(), initialBytes.size())) {
+                                sendFailed = true;
+                                break;
+                            }
+                            initialBytes.clear();
+                        } else if (!sendBodyChunk(data.data(), static_cast<size_t>(got))) {
                             sendFailed = true;
                             break;
                         }
@@ -4240,7 +4280,14 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
     headers << "EXT:\r\n"
             << "Connection: close\r\n\r\n";
 
-    if (!SendAll(client, headers.str())) {
+    // Apply the same first-payload staging to the one-shot worker path.
+    const bool stage_first_payload = !virtual_tail_duration_probe;
+    std::vector<char> initial_bytes;
+    if (stage_first_payload) {
+        initial_bytes.assign(data.data(), data.data() + first_got);
+    }
+    bool first_payload_ready = !stage_first_payload;
+    if (first_payload_ready && !SendAll(client, headers.str())) {
         TerminateAiProcess(process);
         WaitForSingleObject(process.process, 5000);
         if (stderr_thread.joinable()) stderr_thread.join();
@@ -4292,7 +4339,8 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
         return true;
     };
 
-    if (!send_body_chunk(data.data(), static_cast<size_t>(first_got))) {
+    if (first_payload_ready &&
+        !send_body_chunk(data.data(), static_cast<size_t>(first_got))) {
         send_failed = true;
     }
 
@@ -4309,7 +4357,16 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
         if (!ok || got == 0) break;
 
         const auto sendStart = std::chrono::steady_clock::now();
-        if (!send_body_chunk(data.data(), static_cast<size_t>(got))) {
+        if (!first_payload_ready) {
+            initial_bytes.insert(initial_bytes.end(), data.data(), data.data() + got);
+            first_payload_ready = true;
+            if (!SendAll(client, headers.str()) ||
+                !send_body_chunk(initial_bytes.data(), initial_bytes.size())) {
+                send_failed = true;
+                break;
+            }
+            initial_bytes.clear();
+        } else if (!send_body_chunk(data.data(), static_cast<size_t>(got))) {
             send_failed = true;
             break;
         }
@@ -4410,12 +4467,9 @@ std::string DlnaServer::MediaUrl(const MediaItem& item) const {
 }
 
 std::string DlnaServer::MimeType(const MediaItem& item) const {
-    if (ai_passthrough_.load(std::memory_order_relaxed) && item.is_video) {
+    if ((active_ai_mode_.load(std::memory_order_relaxed) != 3) && item.is_video) {
         AiOutputMode selectedMode;
-        {
-            std::lock_guard<std::mutex> lock(ai_mode_mutex_);
-            selectedMode = ai_output_mode_;
-        }
+        selectedMode = DecodeAiOutputMode(active_ai_mode_.load(std::memory_order_relaxed));
         return selectedMode == AiOutputMode::WebmVp9Alpha
             ? "video/webm" : "video/mp2t";
     }
@@ -4437,10 +4491,7 @@ std::string DlnaServer::MimeType(const MediaItem& item) const {
 
 std::string DlnaServer::AiOutputLabel() const {
     AiOutputMode selectedMode;
-    {
-        std::lock_guard<std::mutex> lock(ai_mode_mutex_);
-        selectedMode = ai_output_mode_;
-    }
+    selectedMode = DecodeAiOutputMode(active_ai_mode_.load(std::memory_order_relaxed));
     if (selectedMode == AiOutputMode::WebmVp9Alpha) {
         return "Alpha: WebM VP9 Alpha/libvpx (may drop frames)";
     }
@@ -4451,12 +4502,16 @@ std::string DlnaServer::AiOutputLabel() const {
 }
 
 std::string DlnaServer::DlnaContentFeatures() const {
-    if (ai_passthrough_.load(std::memory_order_relaxed)) {
+    if ((active_ai_mode_.load(std::memory_order_relaxed) != 3)) {
         if (g_r800zz_vrplayer_request) {
             // Preserve the existing r800zzvrplayer contract: DLNA time seek only.
             return "DLNA.ORG_OP=10;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000";
         }
-        // Generic clients get the experimental virtual HTTP byte-range capability.
+        // Live WebM supports time seek but has no valid byte-range mapping.
+        if (DecodeAiOutputMode(active_ai_mode_.load(std::memory_order_relaxed)) ==
+            AiOutputMode::WebmVp9Alpha) {
+            return "DLNA.ORG_OP=10;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000";
+        }
         return "DLNA.ORG_OP=11;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000";
     }
     return "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
@@ -4468,12 +4523,9 @@ std::string DlnaServer::DlnaProtocolInfo(const MediaItem* item) const {
             ":DLNA.ORG_OP=01;DLNA.ORG_CI=0;"
             "DLNA.ORG_FLAGS=01700000000000000000000000000000";
     }
-    if (item || ai_passthrough_.load(std::memory_order_relaxed)) {
+    if (item || (active_ai_mode_.load(std::memory_order_relaxed) != 3)) {
         AiOutputMode selectedMode;
-        {
-            std::lock_guard<std::mutex> lock(ai_mode_mutex_);
-            selectedMode = ai_output_mode_;
-        }
+        selectedMode = DecodeAiOutputMode(active_ai_mode_.load(std::memory_order_relaxed));
         const std::string mime = item
             ? MimeType(*item)
             : (selectedMode == AiOutputMode::WebmVp9Alpha
@@ -4726,16 +4778,17 @@ std::string DlnaServer::BrowseSoapResponse(const std::string& object_id,
         // established stream-only metadata.
         uint64_t advertisedSize = item.size;
         AiOutputMode selectedMode;
-        {
-            std::lock_guard<std::mutex> lock(ai_mode_mutex_);
-            selectedMode = ai_output_mode_;
-        }
-        if (ai_passthrough_.load(std::memory_order_relaxed) && item.is_video &&
+        selectedMode = DecodeAiOutputMode(active_ai_mode_.load(std::memory_order_relaxed));
+        if ((active_ai_mode_.load(std::memory_order_relaxed) != 3) && item.is_video &&
             selectedMode != AiOutputMode::WebmVp9Alpha) {
             advertisedSize = RealtimeTsVirtualSizeBytes(item.duration_ms);
         }
-        if (advertisedSize > 0 &&
-            (!ai_passthrough_.load(std::memory_order_relaxed) ||
+        // Source byte length must not masquerade as encoded WebM byte length.
+        const bool liveWebm =
+            active_ai_mode_.load(std::memory_order_relaxed) != 3 &&
+            item.is_video && selectedMode == AiOutputMode::WebmVp9Alpha;
+        if (!liveWebm && advertisedSize > 0 &&
+            (!(active_ai_mode_.load(std::memory_order_relaxed) != 3) ||
              !item.is_video || !g_r800zz_vrplayer_request)) {
             d << " size=\"" << advertisedSize << "\"";
         }
@@ -4868,5 +4921,4 @@ std::string DlnaServer::SimpleSoapResponse(const std::string& service,
         << "</s:Body></s:Envelope>";
     return xml.str();
 }
-
 

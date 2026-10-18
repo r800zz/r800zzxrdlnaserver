@@ -30,6 +30,7 @@
 
 
 int ui_language = 0;
+std::atomic<int> g_selected_ai_mode{3};
 
 // Order the URL choices without changing server-side adapter handling.
 static void SortDlnaAddresses(std::vector<std::string>& addresses) {
@@ -1485,7 +1486,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                    L"R800ZZDlnaServerWindow", nullptr};
     RegisterClassExW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName,
-                              L"r800zzXRdlnaServer 0.9",
+                              L"r800zzXRdlnaServer 1.0",
                               WS_OVERLAPPEDWINDOW, 100, 100, 820, 720,
                               nullptr, nullptr, wc.hInstance, nullptr);
 
@@ -1664,8 +1665,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     int selected_address = addresses.empty() ? -1 : 0;
     // 0=Alpha packed, 1=Alpha WebM VP9, 2=Chroma Key, 3=OFF.
     bool ai_stream_mode_has_saved_or_user_value = saved_ai_stream_mode >= 0;
-    int ai_stream_mode = ai_stream_mode_has_saved_or_user_value
-        ? saved_ai_stream_mode : 3;
+    g_selected_ai_mode.store(ai_stream_mode_has_saved_or_user_value
+        ? saved_ai_stream_mode : 3, std::memory_order_relaxed);
     int previous_ai_backend = ai_backend;
     auto directml_adapters = EnumerateDirectMlAdapters();
     int directml_adapter_choice = directml_adapters.empty() ? -1 : 0;
@@ -1709,10 +1710,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     int previous_conversion_directml_adapter_choice =
         conversion_directml_adapter_choice;
 
-    auto aiPassthroughEnabled = [&]() { return ai_stream_mode != 3; };
+    auto aiPassthroughEnabled = [&]() { return g_selected_ai_mode.load(std::memory_order_relaxed) != 3; };
     auto selectedAiOutputMode = [&]() {
-        if (ai_stream_mode == 1) return AiOutputMode::WebmVp9Alpha;
-        if (ai_stream_mode == 2) return AiOutputMode::ChromaKeyHevc;
+        if (g_selected_ai_mode.load(std::memory_order_relaxed) == 1) return AiOutputMode::WebmVp9Alpha;
+        if (g_selected_ai_mode.load(std::memory_order_relaxed) == 2) return AiOutputMode::ChromaKeyHevc;
         return AiOutputMode::AlphaPackedHevc;
     };
     auto selectedAiBackend = [&]() {
@@ -2016,6 +2017,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         }
 
         ImGui::TextUnformatted(uiText.aiMode);
+        int ai_stream_mode = g_selected_ai_mode.load(std::memory_order_relaxed);
         const int previousAiStreamMode = ai_stream_mode;
         // All four modes may be selected while the server is running. The
         // current RUN is left untouched; the selection is applied only at the
@@ -2029,16 +2031,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         ImGui::RadioButton("OFF", &ai_stream_mode, 3);
 
         if (ai_stream_mode != previousAiStreamMode) {
+            g_selected_ai_mode.store(ai_stream_mode, std::memory_order_relaxed);
             g_aiErrorText.clear();
             g_aiErrorFatal = false;
             ai_stream_mode_has_saved_or_user_value = true;
-            SaveAiStreamModeSelection(ai_stream_mode);
-            if (server.IsRunning()) {
-                server.SetAiPassthroughMode(
-                    aiPassthroughEnabled(), selectedAiOutputMode());
-            } else {
-                refreshAiPrewarm();
-            }
+            SaveAiStreamModeSelection(g_selected_ai_mode.load(std::memory_order_relaxed));
+            if (!server.IsRunning()) refreshAiPrewarm();
         }
 
         if (ai_backend == 0) {
@@ -2447,7 +2445,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (ai_backend == 1 && directml_adapter_choice >= 0) {
         SaveDirectMlAdapterSelection(directml_adapters, directml_adapter_choice);
     }
-    SaveAiStreamModeSelection(ai_stream_mode);
+    SaveAiStreamModeSelection(g_selected_ai_mode.load(std::memory_order_relaxed));
     SaveVideoFilesOnlySelection(video_files_only);
     SaveConversionBackendSelection(conversion_backend);
     if (conversion_backend == 1 && conversion_directml_adapter_choice >= 0) {
@@ -2470,5 +2468,4 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     CloseHandle(singleInstanceMutex);
     return 0;
 }
-
 

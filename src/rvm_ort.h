@@ -25,6 +25,7 @@ public:
                     std::string& error);
     bool run(const void* srcFp16Nchw, cudaStream_t stream, RvmGpuOutput& output, std::string& error);
     bool resetState(cudaStream_t stream, std::string& error);
+    bool resize(int width, int height, cudaStream_t stream, std::string& error);
 
 private:
     struct Impl;
@@ -49,3 +50,4 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+

@@ -1,5 +1,7 @@
 #include "cuda_kernels.h"
 #include "r800zz_dml_backend.h"
+#include "r800zz_playback_timing_20261017.h"
+#include "r800zz_pipeline_common_20261017.h"
 #include "cpu_converter.h"
 #include "rvm_ort.h"
 #include "simple_video_player.h"
@@ -28,6 +30,7 @@ extern "C" {
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cerrno>
 #include <cstdint>
@@ -35,9 +38,11 @@ extern "C" {
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -46,7 +51,6 @@ extern "C" {
 namespace {
 
 constexpr float kPackScale = 0.4f;
-constexpr double kDropLagSeconds = 0.120;
 // Realtime MPEG-TS uses a fixed transport rate so byte offsets can be mapped
 // to playback time consistently by the DLNA server. Keep this in sync with
 // the server-side virtual-size calculation.
@@ -707,41 +711,11 @@ struct Pipeline {
     }
 
     bool initInput(std::string& error) {
-        const std::string inputUtf8 = args.input.u8string();
-        int rc = avformat_open_input(&inFmt, inputUtf8.c_str(), nullptr, nullptr);
-        if (rc < 0) { error = "avformat_open_input: " + fferr(rc); return false; }
-        rc = avformat_find_stream_info(inFmt, nullptr);
-        if (rc < 0) { error = "avformat_find_stream_info: " + fferr(rc); return false; }
-
-        videoIndex = av_find_best_stream(inFmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-        if (videoIndex < 0) { error = "No video stream"; return false; }
-        inVideo = inFmt->streams[videoIndex];
-        width = inVideo->codecpar->width;
-        height = inVideo->codecpar->height;
-        frameRate = av_guess_frame_rate(inFmt, inVideo, nullptr);
-        if (frameRate.num <= 0 || frameRate.den <= 0) frameRate = AVRational{30, 1};
-
-        audioIndex = av_find_best_stream(inFmt, AVMEDIA_TYPE_AUDIO, -1, videoIndex, nullptr, 0);
-        if (audioIndex >= 0) inAudio = inFmt->streams[audioIndex];
-
-        int64_t durationMs = 0;
-        if (inFmt->duration != AV_NOPTS_VALUE && inFmt->duration > 0) {
-            durationMs = av_rescale_q(inFmt->duration, AV_TIME_BASE_Q, AVRational{1, 1000});
-        }
-        logLine("META durationMs=" + std::to_string(durationMs));
-
-        if (args.startMs > 0) {
-            const int64_t baseUs = inFmt->start_time != AV_NOPTS_VALUE ? inFmt->start_time : 0;
-            requestedStartTimestampUs = baseUs + args.startMs * 1000LL;
-            rc = avformat_seek_file(
-                inFmt, -1, INT64_MIN, requestedStartTimestampUs, INT64_MAX, AVSEEK_FLAG_BACKWARD);
-            if (rc < 0) {
-                error = "avformat_seek_file startMs=" + std::to_string(args.startMs) + ": " + fferr(rc);
-                return false;
-            }
-            logLine("input seek requested startMs=" + std::to_string(args.startMs));
-        }
-        return true;
+        return r800zz::openVideoInput(
+            args.input, args.startMs, inFmt, inVideo, inAudio,
+            videoIndex, audioIndex, width, height, frameRate,
+            requestedStartTimestampUs, error,
+            [](const std::string& message) { logLine(message); });
     }
 
     bool initCudaDevice(std::string& error) {
@@ -1230,34 +1204,11 @@ struct Pipeline {
         return true;
     }
 
-    double videoSeconds(int64_t pts) const {
-        if (pts == AV_NOPTS_VALUE || firstVideoPts == AV_NOPTS_VALUE) return 0.0;
-        return static_cast<double>(pts - firstVideoPts) * av_q2d(inVideo->time_base);
-    }
-
     bool paceOrDrop(int64_t pts) {
-        if (args.offlineConvert) return false;
-        if (pts == AV_NOPTS_VALUE) return false;
-        if (firstVideoPts == AV_NOPTS_VALUE) {
-            firstVideoPts = pts;
-            return false;
-        }
-        // The cold/warm-up cost of the first RVM frame must not count as
-        // playback time. The clock starts only after that frame is complete.
-        if (!playbackClockStarted) return false;
-        const double src = videoSeconds(pts);
-        const auto now = std::chrono::steady_clock::now();
-        const double wall = std::chrono::duration<double>(now - wallStart).count();
-        const double delta = src - wall;
-        if (delta > 0.002) {
-            std::this_thread::sleep_for(std::chrono::duration<double>(delta));
-            return false;
-        }
-        if (delta < -kDropLagSeconds) {
-            ++dropped;
-            return true;
-        }
-        return false;
+        return r800zz::paceOrDropFrame(
+            args.offlineConvert, pts, firstVideoPts,
+            playbackClockStarted, inVideo->time_base,
+            wallStart, dropped);
     }
 
     bool writeEncodedPackets(std::string& error) {
@@ -1907,8 +1858,6 @@ struct Pipeline {
     }
 
     bool run(std::string& error) {
-        std::unique_ptr<AVPacket, AvPacketCloser> pkt(av_packet_alloc());
-        if (!pkt) { error = "av_packet_alloc failed"; return false; }
 
         if (args.previewOnly) {
             logLine("Standalone preview active: FFmpeg NVDEC(CUDA) -> ONNX Runtime CUDA EP RVM -> CUDA AlphaPacked -> preview window");
@@ -1940,34 +1889,25 @@ struct Pipeline {
             logLine(oss.str());
         }
 
-        for (;;) {
-            if (cancelFlag && cancelFlag->load()) {
-                logLine("stream cancellation requested");
-                return true;
-            }
-            int rc = av_read_frame(inFmt, pkt.get());
-            if (rc == AVERROR_EOF) break;
-            if (rc < 0) { error = "av_read_frame: " + fferr(rc); return false; }
-
-            if (pkt->stream_index == videoIndex) {
-                ++videoPacketsRead;
-                if (videoPacketsRead == 1) {
-                    std::ostringstream v;
-                    v << "first-frame stage=demux_video_packet bytes=" << pkt->size
-                      << " pts=" << pkt->pts << " dts=" << pkt->dts;
-                    logLine(v.str());
-                }
-                rc = avcodec_send_packet(dec, pkt.get());
-                av_packet_unref(pkt.get());
-                if (rc < 0 && rc != AVERROR(EAGAIN)) { error = "avcodec_send_packet: " + fferr(rc); return false; }
-                if (!drainDecoder(error)) return false;
-            } else if (!args.previewOnly && audioIndex >= 0 && pkt->stream_index == audioIndex && outAudio) {
-                if (!queueAudioPacket(pkt.get(), error)) return false;
-                av_packet_unref(pkt.get());
-            } else {
-                av_packet_unref(pkt.get());
-            }
+        if (!r800zz::readVideoPackets(
+                inFmt, videoIndex, audioIndex, args.previewOnly,
+                outAudio != nullptr, cancelFlag, videoPacketsRead, error,
+                [](const std::string& message) { logLine(message); },
+                [&](AVPacket* packet, std::string& failure) -> bool {
+                    const int rc = avcodec_send_packet(dec, packet);
+                    if (rc < 0 && rc != AVERROR(EAGAIN)) {
+                        failure = "avcodec_send_packet: " + fferr(rc);
+                        return false;
+                    }
+                    return drainDecoder(failure);
+                },
+                [&](AVPacket* packet, std::string& failure) -> bool {
+                    return queueAudioPacket(packet, failure);
+                })) {
+            return false;
         }
+
+        if (cancelFlag && cancelFlag->load()) return true;
 
         int rc = avcodec_send_packet(dec, nullptr);
         if (rc < 0 && rc != AVERROR_EOF) {
@@ -2141,6 +2081,8 @@ int main(int argc, char** argv) {
         ResidentBackend residentBackend = ResidentBackend::None;
         int residentDevice = -1;
         std::filesystem::path residentInput;
+        int residentCudaWidth = 0;
+        int residentCudaHeight = 0;
 
         std::unique_ptr<RvmOrtGpu> residentCudaRvm;
         AVBufferRef* residentCudaDevice = nullptr;
@@ -2148,12 +2090,44 @@ int main(int argc, char** argv) {
         R800zzDmlResidentSession* residentDmlSession = nullptr;
 
         std::atomic<bool> cancelStream{false};
-        std::thread streamThread;
+        std::mutex streamMutex;
+        std::condition_variable streamCondition;
+        std::function<void()> pendingStreamJob;
+        bool streamBusy = false;
+        bool streamWorkerExit = false;
         uint64_t activeRequestId = 0;
+
+        // Keep one stream worker alive for the entire resident process.
+        // RUN replaces the job, never the worker thread.
+        std::thread streamThread([&]() {
+            std::unique_lock<std::mutex> lock(streamMutex);
+            for (;;) {
+                streamCondition.wait(lock, [&]() {
+                    return streamWorkerExit || static_cast<bool>(pendingStreamJob);
+                });
+                if (streamWorkerExit) break;
+                auto job = std::move(pendingStreamJob);
+                pendingStreamJob = {};
+                lock.unlock();
+                try {
+                    job();
+                } catch (const std::exception& e) {
+                    logLine(std::string("RESIDENT_STREAM_ERROR unexpected: ") + e.what());
+                } catch (...) {
+                    logLine("RESIDENT_STREAM_ERROR unexpected exception");
+                }
+                lock.lock();
+                streamBusy = false;
+                streamCondition.notify_all();
+            }
+        });
 
         auto stopCurrentStream = [&]() {
             cancelStream.store(true);
-            if (streamThread.joinable()) streamThread.join();
+            std::unique_lock<std::mutex> lock(streamMutex);
+            streamCondition.wait(lock, [&]() { return !streamBusy; });
+            // A completed job has released all per-stream resources.
+            pendingStreamJob = {};
             cancelStream.store(false);
         };
 
@@ -2174,6 +2148,8 @@ int main(int argc, char** argv) {
             residentBackend = ResidentBackend::None;
             residentDevice = -1;
             residentInput.clear();
+            residentCudaWidth = 0;
+            residentCudaHeight = 0;
         };
 
         auto parseBackend = [](const std::string& name, ResidentBackend& backend) {
@@ -2210,18 +2186,44 @@ int main(int argc, char** argv) {
                 requestedBackend == ResidentBackend::Cuda ? requestedDevice :
                 (requestedBackend == ResidentBackend::DirectML ? requestedDevice : -1);
 
-            if (residentBackend == requestedBackend &&
-                residentDevice == normalizedDevice &&
-                residentInput == input) {
-                return true;
-            }
-
-            releaseBackend();
-
             if (!std::filesystem::is_regular_file(input)) {
                 error = "input not found: " + input.u8string();
                 return false;
             }
+
+            int inputWidth = 0;
+            int inputHeight = 0;
+            if (requestedBackend == ResidentBackend::Cuda) {
+                Pipeline probe;
+                probe.args = args;
+                probe.args.input = input;
+                if (!probe.initInput(error)) return false;
+                inputWidth = probe.width;
+                inputHeight = probe.height;
+            }
+
+            if (residentBackend == requestedBackend &&
+                residentDevice == normalizedDevice &&
+                (requestedBackend == ResidentBackend::Cuda
+                    ? (residentCudaRvm && residentCudaDevice && residentCudaStream)
+                    : residentInput == input)) {
+                if (requestedBackend == ResidentBackend::Cuda &&
+                    (residentCudaWidth != inputWidth ||
+                     residentCudaHeight != inputHeight)) {
+                    if (!residentCudaRvm->resize(
+                            inputWidth, inputHeight, residentCudaStream, error)) {
+                        return false;
+                    }
+                    residentCudaWidth = inputWidth;
+                    residentCudaHeight = inputHeight;
+                    logLine("resident RVM resolution changed; CUDA EP session retained");
+                }
+                residentInput = input;
+                logLine("resident backend/RVM reused for input=" + input.u8string());
+                return true;
+            }
+
+            releaseBackend();
 
             if (requestedBackend == ResidentBackend::Cuda) {
                 if (!std::filesystem::is_regular_file(cudaModel)) {
@@ -2274,6 +2276,8 @@ int main(int argc, char** argv) {
                 warm.cudaStream = nullptr;
                 warm.ownsCudaStream = false;
                 warm.cleanup();
+                residentCudaWidth = inputWidth;
+                residentCudaHeight = inputHeight;
             } else {
                 if (!std::filesystem::is_regular_file(dmlModel)) {
                     error = "DirectML/CPU model not found: " + dmlModel.u8string();
@@ -2440,7 +2444,18 @@ int main(int argc, char** argv) {
             stopCurrentStream();
             activeRequestId = requestId;
 
-            if (!prepareBackend(
+            // A prepared session already owns the selected execution provider.
+            // Stream input is opened once in the stream thread. Size updates are
+            // handled there for CUDA, DirectML, and CPU.
+            const int normalizedRequestedDevice =
+                requestedBackend == ResidentBackend::Cpu ? -1 : requestedDevice;
+            const bool reusePreparedBackend =
+                requestedBackend == residentBackend &&
+                residentDevice == normalizedRequestedDevice &&
+                (requestedBackend == ResidentBackend::Cuda
+                    ? (residentCudaRvm && residentCudaDevice && residentCudaStream)
+                    : residentDmlSession != nullptr);
+            if (!reusePreparedBackend && !prepareBackend(
                     requestedBackend, requestedDevice,
                     streamInput, prepareError)) {
                 logLine("RESIDENT_STREAM_ERROR id=" +
@@ -2455,9 +2470,11 @@ int main(int argc, char** argv) {
 
             const int64_t startMs =
                 std::max<long long>(0, requestedMs);
-            streamThread = std::thread(
-                [&, startMs, outputMode, pipeName,
-                 streamInput, requestId, requestedBackend]() {
+            {
+                std::lock_guard<std::mutex> lock(streamMutex);
+                streamBusy = true;
+                pendingStreamJob = [&, startMs, outputMode, pipeName,
+                                    streamInput, requestId, requestedBackend]() {
                     HANDLE output = openOutputPipe(pipeName);
                     if (output == INVALID_HANDLE_VALUE) return;
 
@@ -2489,7 +2506,19 @@ int main(int argc, char** argv) {
                         p.outputHandle = output;
                         p.cancelFlag = &cancelStream;
 
-                        if (!p.initInput(runError) ||
+                        bool inputReady = p.initInput(runError);
+                        if (inputReady &&
+                            (residentCudaWidth != p.width ||
+                             residentCudaHeight != p.height)) {
+                            inputReady = residentCudaRvm->resize(
+                                p.width, p.height, residentCudaStream, runError);
+                            if (inputReady) {
+                                residentCudaWidth = p.width;
+                                residentCudaHeight = p.height;
+                                logLine("resident RVM resolution changed; CUDA EP session retained");
+                            }
+                        }
+                        if (!inputReady ||
                             !p.initCudaDecoder(runError) ||
                             !p.initRvm(runError) ||
                             !p.initEncoderAndMuxer(runError) ||
@@ -2516,11 +2545,18 @@ int main(int argc, char** argv) {
                             std::to_string(requestId) +
                             " backend=" + backendName(requestedBackend) +
                             " code=" + std::to_string(streamCode));
-                });
+                };
+            }
+            streamCondition.notify_one();
         }
 
-        stopCurrentStream();
         releaseBackend();
+        {
+            std::lock_guard<std::mutex> lock(streamMutex);
+            streamWorkerExit = true;
+        }
+        streamCondition.notify_one();
+        streamThread.join();
         logLine("RESIDENT_EXIT");
         return 0;
     }

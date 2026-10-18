@@ -551,6 +551,60 @@ void main(uint3 tid : SV_DispatchThreadID) {
 }
 )HLSL";
 
+
+// D3D11/D3D12 cross-API sharing uses BGRA8 rather than NV12. BGRA8 is a
+// baseline shareable format on older drivers such as Polaris, while NV12
+// cross-API sharing is optional and fails with E_INVALIDARG on some drivers.
+// These shaders keep the format conversion on GPU and only repack rows between
+// a D3D12 texture footprint and the tightly packed RGBA buffers used by RVM.
+constexpr const char* kBgraPitchedToRgbaShader = R"HLSL(
+ByteAddressBuffer srcBgra : register(t0);
+RWByteAddressBuffer dstRgba : register(u0);
+cbuffer Params : register(b0) {
+    uint width; uint height;
+    uint offset; uint pitch;
+    uint unused0; uint unused1;
+};
+
+[numthreads(16, 16, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+    uint x = tid.x;
+    uint y = tid.y;
+    if (x >= width || y >= height) return;
+    uint bgra = srcBgra.Load(offset + y * pitch + x * 4u);
+    uint b =  bgra        & 0xffu;
+    uint g = (bgra >>  8) & 0xffu;
+    uint r = (bgra >> 16) & 0xffu;
+    uint a = (bgra >> 24) & 0xffu;
+    dstRgba.Store((y * width + x) * 4u,
+                  r | (g << 8) | (b << 16) | (a << 24));
+}
+)HLSL";
+
+constexpr const char* kRgbaToBgraPitchedShader = R"HLSL(
+ByteAddressBuffer srcRgba : register(t0);
+RWByteAddressBuffer dstBgra : register(u0);
+cbuffer Params : register(b0) {
+    uint width; uint height;
+    uint offset; uint pitch;
+    uint unused0; uint unused1;
+};
+
+[numthreads(16, 16, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+    uint x = tid.x;
+    uint y = tid.y;
+    if (x >= width || y >= height) return;
+    uint rgba = srcRgba.Load((y * width + x) * 4u);
+    uint r =  rgba        & 0xffu;
+    uint g = (rgba >>  8) & 0xffu;
+    uint b = (rgba >> 16) & 0xffu;
+    uint a = (rgba >> 24) & 0xffu;
+    dstBgra.Store(offset + y * pitch + x * 4u,
+                  b | (g << 8) | (r << 16) | (a << 24));
+}
+)HLSL";
+
 } // namespace
 
 struct RvmOrt::Impl {
@@ -595,6 +649,8 @@ struct RvmOrt::Impl {
     ComPtr<ID3D12RootSignature> interopRootSignature;
     ComPtr<ID3D12PipelineState> nv12PitchedToRgbaPso;
     ComPtr<ID3D12PipelineState> rgbaToNv12PitchedPso;
+    ComPtr<ID3D12PipelineState> bgraPitchedToRgbaPso;
+    ComPtr<ID3D12PipelineState> rgbaToBgraPitchedPso;
 
     ComPtr<ID3D12Resource> uploadRgba;
     ComPtr<ID3D12Resource> gpuInputYuv;
@@ -611,12 +667,22 @@ struct RvmOrt::Impl {
     static constexpr size_t kInteropOutputSurfaceCount = 8;
     ComPtr<ID3D11Device> interopD3d11Device;
     ComPtr<ID3D11DeviceContext> interopD3d11Context;
+    ComPtr<ID3D11VideoDevice> interopVideoDevice;
+    ComPtr<ID3D11VideoContext> interopVideoContext;
+    ComPtr<ID3D11VideoProcessorEnumerator> interopVideoEnumerator;
+    ComPtr<ID3D11VideoProcessor> interopVideoProcessor;
+    ComPtr<ID3D11VideoProcessorOutputView> interopInputBgraOutputView;
+    std::array<ComPtr<ID3D11VideoProcessorInputView>, kInteropOutputSurfaceCount>
+        interopOutputBgraInputViews;
+    std::array<ComPtr<ID3D11Texture2D>, kInteropOutputSurfaceCount>
+        interopCompatNv12Textures;
+    std::array<ComPtr<ID3D11VideoProcessorOutputView>, kInteropOutputSurfaceCount>
+        interopCompatNv12OutputViews;
     ComPtr<ID3D11Device5> interopD3d11Device5;
     ComPtr<ID3D11DeviceContext4> interopD3d11Context4;
     ComPtr<ID3D11Fence> interopFence11;
     ComPtr<ID3D11Texture2D> interopInputD3d11;
     std::array<ComPtr<ID3D11Texture2D>, kInteropOutputSurfaceCount> interopOutputD3d11;
-    ComPtr<ID3D11Query> interopCopyQuery;
     std::array<ComPtr<ID3D12CommandAllocator>, kInteropOutputSurfaceCount>
         interopPreprocessAllocators;
     std::array<ComPtr<ID3D12GraphicsCommandList>, kInteropOutputSurfaceCount>
@@ -723,6 +789,25 @@ bool RvmOrt::initialize(const std::wstring& modelPath,
     } catch (const Ort::Exception& e) {
         error = ortError(e);
         return false;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+}
+
+bool RvmOrt::resizeCpu(int width, int height, std::string& error) {
+    if (!impl_->session || impl_->backend != RvmBackend::CPU ||
+        width <= 0 || height <= 0) {
+        error = "RVM CPU resize requires an initialized CPU session and valid dimensions";
+        return false;
+    }
+    if (impl_->width == width && impl_->height == height) return true;
+    try {
+        std::vector<float> nextAlpha(static_cast<size_t>(width) * static_cast<size_t>(height), 0.0f);
+        impl_->alpha.swap(nextAlpha);
+        impl_->width = width;
+        impl_->height = height;
+        return resetState(error);
     } catch (const std::exception& e) {
         error = e.what();
         return false;
@@ -1031,6 +1116,8 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
             ComPtr<ID3DBlob> chromaShader;
             ComPtr<ID3DBlob> nv12Shader;
             ComPtr<ID3DBlob> nv12PitchedOutputShader;
+            ComPtr<ID3DBlob> bgraPitchedInputShader;
+            ComPtr<ID3DBlob> bgraPitchedOutputShader;
             if (!compileComputeShader(
                     kPreprocessShader, preprocessShader, error)) {
                 return false;
@@ -1063,8 +1150,16 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
                     kRgbaToNv12PitchedShader, nv12PitchedOutputShader, error)) {
                 return false;
             }
+            if (!compileComputeShader(
+                    kBgraPitchedToRgbaShader, bgraPitchedInputShader, error)) {
+                return false;
+            }
+            if (!compileComputeShader(
+                    kRgbaToBgraPitchedShader, bgraPitchedOutputShader, error)) {
+                return false;
+            }
 
-            // Dedicated root signature for D3D11<->D3D12 NV12 interop.
+            // Dedicated root signature for D3D11<->D3D12 GPU interop.
             D3D12_ROOT_PARAMETER interopParams[3]{};
             interopParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
             interopParams[0].Descriptor.ShaderRegister = 0;
@@ -1182,6 +1277,22 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
                 &pso, IID_PPV_ARGS(&impl_->rgbaToNv12PitchedPso));
             if (FAILED(hr)) {
                 error = hrError("CreateComputePipelineState(rgba-to-nv12-pitched)", hr);
+                return false;
+            }
+            pso.CS.pShaderBytecode = bgraPitchedInputShader->GetBufferPointer();
+            pso.CS.BytecodeLength = bgraPitchedInputShader->GetBufferSize();
+            hr = impl_->d3d12Device->CreateComputePipelineState(
+                &pso, IID_PPV_ARGS(&impl_->bgraPitchedToRgbaPso));
+            if (FAILED(hr)) {
+                error = hrError("CreateComputePipelineState(bgra-pitched-to-rgba)", hr);
+                return false;
+            }
+            pso.CS.pShaderBytecode = bgraPitchedOutputShader->GetBufferPointer();
+            pso.CS.BytecodeLength = bgraPitchedOutputShader->GetBufferSize();
+            hr = impl_->d3d12Device->CreateComputePipelineState(
+                &pso, IID_PPV_ARGS(&impl_->rgbaToBgraPitchedPso));
+            if (FAILED(hr)) {
+                error = hrError("CreateComputePipelineState(rgba-to-bgra-pitched)", hr);
                 return false;
             }
 
@@ -1304,21 +1415,22 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
             if (srcDesc.Format != DXGI_FORMAT_NV12 ||
                 static_cast<int>(srcDesc.Width) != impl_->width ||
                 static_cast<int>(srcDesc.Height) != impl_->height) {
-                error = "D3D11 zero-copy input requires NV12 texture matching video size";
+                error = "D3D11 GPU input requires NV12 texture matching video size";
                 return false;
             }
+
             ID3D11Device* rawD3d11Device = nullptr;
             sourceTexture->GetDevice(&rawD3d11Device);
             impl_->interopD3d11Device.Attach(rawD3d11Device);
             if (!impl_->interopD3d11Device) {
-                error = "D3D11 zero-copy input device unavailable";
+                error = "D3D11 GPU input device unavailable";
                 return false;
             }
             ID3D11DeviceContext* rawD3d11Context = nullptr;
             impl_->interopD3d11Device->GetImmediateContext(&rawD3d11Context);
             impl_->interopD3d11Context.Attach(rawD3d11Context);
             if (!impl_->interopD3d11Context) {
-                error = "D3D11 zero-copy immediate context unavailable";
+                error = "D3D11 GPU immediate context unavailable";
                 return false;
             }
 
@@ -1328,6 +1440,77 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
                 error = hrError("QueryInterface(ID3D11Device1)", hr11);
                 return false;
             }
+
+            // Keep NV12 video surfaces on D3D11 and use the hardware video
+            // processor for NV12<->BGRA. Only BGRA crosses the D3D11/D3D12
+            // boundary because BGRA8 is broadly shareable on older AMD GPUs.
+            hr11 = impl_->interopD3d11Device.As(&impl_->interopVideoDevice);
+            if (FAILED(hr11) || !impl_->interopVideoDevice) {
+                error = hrError("QueryInterface(ID3D11VideoDevice)", hr11);
+                return false;
+            }
+            hr11 = impl_->interopD3d11Context.As(&impl_->interopVideoContext);
+            if (FAILED(hr11) || !impl_->interopVideoContext) {
+                error = hrError("QueryInterface(ID3D11VideoContext)", hr11);
+                return false;
+            }
+
+            D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
+            content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+            content.InputFrameRate = DXGI_RATIONAL{30, 1};
+            content.InputWidth = static_cast<UINT>(impl_->width);
+            content.InputHeight = static_cast<UINT>(impl_->height);
+            content.OutputFrameRate = DXGI_RATIONAL{30, 1};
+            content.OutputWidth = static_cast<UINT>(impl_->width);
+            content.OutputHeight = static_cast<UINT>(impl_->height);
+            content.Usage = D3D11_VIDEO_USAGE_OPTIMAL_SPEED;
+            hr11 = impl_->interopVideoDevice->CreateVideoProcessorEnumerator(
+                &content, &impl_->interopVideoEnumerator);
+            if (FAILED(hr11) || !impl_->interopVideoEnumerator) {
+                error = hrError("CreateVideoProcessorEnumerator", hr11);
+                return false;
+            }
+
+            UINT nv12Support = 0;
+            UINT bgraSupport = 0;
+            hr11 = impl_->interopVideoEnumerator->CheckVideoProcessorFormat(
+                DXGI_FORMAT_NV12, &nv12Support);
+            if (FAILED(hr11)) {
+                error = hrError("CheckVideoProcessorFormat(NV12)", hr11);
+                return false;
+            }
+            hr11 = impl_->interopVideoEnumerator->CheckVideoProcessorFormat(
+                DXGI_FORMAT_B8G8R8A8_UNORM, &bgraSupport);
+            if (FAILED(hr11)) {
+                error = hrError("CheckVideoProcessorFormat(BGRA8)", hr11);
+                return false;
+            }
+            const UINT required =
+                D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT |
+                D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT;
+            if ((nv12Support & required) != required ||
+                (bgraSupport & required) != required) {
+                error = "D3D11 video processor does not support GPU NV12<->BGRA conversion";
+                return false;
+            }
+
+            hr11 = impl_->interopVideoDevice->CreateVideoProcessor(
+                impl_->interopVideoEnumerator.Get(), 0,
+                &impl_->interopVideoProcessor);
+            if (FAILED(hr11) || !impl_->interopVideoProcessor) {
+                error = hrError("CreateVideoProcessor", hr11);
+                return false;
+            }
+            const RECT fullRect{0, 0, impl_->width, impl_->height};
+            impl_->interopVideoContext->VideoProcessorSetStreamFrameFormat(
+                impl_->interopVideoProcessor.Get(), 0,
+                D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+            impl_->interopVideoContext->VideoProcessorSetStreamSourceRect(
+                impl_->interopVideoProcessor.Get(), 0, TRUE, &fullRect);
+            impl_->interopVideoContext->VideoProcessorSetStreamDestRect(
+                impl_->interopVideoProcessor.Get(), 0, TRUE, &fullRect);
+            impl_->interopVideoContext->VideoProcessorSetOutputTargetRect(
+                impl_->interopVideoProcessor.Get(), TRUE, &fullRect);
 
             D3D12_HEAP_PROPERTIES sharedHeap{};
             sharedHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -1342,10 +1525,10 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
             sharedDesc12.Height = static_cast<UINT>(impl_->height);
             sharedDesc12.DepthOrArraySize = 1;
             sharedDesc12.MipLevels = 1;
-            sharedDesc12.Format = DXGI_FORMAT_NV12;
+            sharedDesc12.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
             sharedDesc12.SampleDesc.Count = 1;
             sharedDesc12.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-            sharedDesc12.Flags = D3D12_RESOURCE_FLAG_NONE;
+            sharedDesc12.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
             auto createSharedPair = [&](ComPtr<ID3D12Resource>& resource12,
                                         ComPtr<ID3D11Texture2D>& texture11,
@@ -1365,14 +1548,14 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
                 localHr = impl_->d3d12Device->CreateSharedHandle(
                     resource12.Get(), nullptr, GENERIC_ALL, nullptr, &sharedHandle);
                 if (FAILED(localHr) || !sharedHandle) {
-                    error = hrError("CreateSharedHandle(D3D12 texture)", localHr);
+                    error = hrError("CreateSharedHandle(D3D12 BGRA texture)", localHr);
                     return false;
                 }
                 localHr = d3d11Device1->OpenSharedResource1(
                     sharedHandle, IID_PPV_ARGS(&texture11));
                 CloseHandle(sharedHandle);
                 if (FAILED(localHr)) {
-                    error = hrError("OpenSharedResource1(D3D11 texture)", localHr);
+                    error = hrError("OpenSharedResource1(D3D11 BGRA texture)", localHr);
                     return false;
                 }
                 return true;
@@ -1381,23 +1564,52 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
             if (!createSharedPair(
                     impl_->interopInputD3d12,
                     impl_->interopInputD3d11,
-                    "CreateCommittedResource(D3D12 interop input)")) {
+                    "CreateCommittedResource(D3D12 BGRA interop input)")) {
                 return false;
             }
             for (size_t i = 0; i < Impl::kInteropOutputSurfaceCount; ++i) {
                 if (!createSharedPair(
                         impl_->interopOutputD3d12[i],
                         impl_->interopOutputD3d11[i],
-                        "CreateCommittedResource(D3D12 interop output)")) {
+                        "CreateCommittedResource(D3D12 BGRA interop output)")) {
                     return false;
                 }
                 impl_->interopOutputD3d12State[i] = D3D12_RESOURCE_STATE_COMMON;
             }
             impl_->interopOutputCursor = 0;
 
-            // Share the DirectML D3D12 fence with D3D11. On current
-            // Windows 10/11 drivers this lets both APIs synchronize entirely
-            // on the GPU timeline instead of polling/waiting on the CPU.
+            D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC bgraOutputDesc{};
+            bgraOutputDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+            bgraOutputDesc.Texture2D.MipSlice = 0;
+            hr11 = impl_->interopVideoDevice->CreateVideoProcessorOutputView(
+                impl_->interopInputD3d11.Get(),
+                impl_->interopVideoEnumerator.Get(),
+                &bgraOutputDesc,
+                &impl_->interopInputBgraOutputView);
+            if (FAILED(hr11) || !impl_->interopInputBgraOutputView) {
+                error = hrError("CreateVideoProcessorOutputView(shared BGRA input)", hr11);
+                return false;
+            }
+
+            D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC bgraInputDesc{};
+            bgraInputDesc.FourCC = 0;
+            bgraInputDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+            bgraInputDesc.Texture2D.MipSlice = 0;
+            bgraInputDesc.Texture2D.ArraySlice = 0;
+            for (size_t i = 0; i < Impl::kInteropOutputSurfaceCount; ++i) {
+                hr11 = impl_->interopVideoDevice->CreateVideoProcessorInputView(
+                    impl_->interopOutputD3d11[i].Get(),
+                    impl_->interopVideoEnumerator.Get(),
+                    &bgraInputDesc,
+                    &impl_->interopOutputBgraInputViews[i]);
+                if (FAILED(hr11) || !impl_->interopOutputBgraInputViews[i]) {
+                    error = hrError("CreateVideoProcessorInputView(shared BGRA output)", hr11);
+                    return false;
+                }
+            }
+
+            // GPU fence sharing is mandatory for the GPU-only path. Do not
+            // silently fall back to CPU polling/synchronization.
             HRESULT device5Hr = impl_->interopD3d11Device.As(
                 &impl_->interopD3d11Device5);
             HRESULT context4Hr = impl_->interopD3d11Context.As(
@@ -1417,68 +1629,57 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
                     }
                 }
             }
-
             if (!impl_->interopGpuFenceReady) {
-                // Compatibility fallback only. The normal DirectML realtime
-                // path uses the shared fence and never enters this CPU poll.
-                D3D11_QUERY_DESC queryDesc{};
-                queryDesc.Query = D3D11_QUERY_EVENT;
-                hr11 = impl_->interopD3d11Device->CreateQuery(
-                    &queryDesc, impl_->interopCopyQuery.ReleaseAndGetAddressOf());
-                if (FAILED(hr11)) {
-                    error = hrError("CreateQuery(D3D11 interop fallback)", hr11);
+                error = "GPU-only D3D11/D3D12 shared fence interop is unavailable";
+                return false;
+            }
+
+            for (size_t i = 0; i < Impl::kInteropOutputSurfaceCount; ++i) {
+                HRESULT localHr = impl_->d3d12Device->CreateCommandAllocator(
+                    D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    IID_PPV_ARGS(&impl_->interopPreprocessAllocators[i]));
+                if (FAILED(localHr)) {
+                    error = hrError("CreateCommandAllocator(interop preprocess)", localHr);
                     return false;
                 }
-            } else {
-                // Keep several command allocators in flight. This is required
-                // once the per-frame CPU fence wait is removed.
-                for (size_t i = 0; i < Impl::kInteropOutputSurfaceCount; ++i) {
-                    HRESULT localHr = impl_->d3d12Device->CreateCommandAllocator(
-                        D3D12_COMMAND_LIST_TYPE_DIRECT,
-                        IID_PPV_ARGS(&impl_->interopPreprocessAllocators[i]));
-                    if (FAILED(localHr)) {
-                        error = hrError("CreateCommandAllocator(interop preprocess)", localHr);
-                        return false;
-                    }
-                    localHr = impl_->d3d12Device->CreateCommandList(
-                        0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                        impl_->interopPreprocessAllocators[i].Get(), nullptr,
-                        IID_PPV_ARGS(&impl_->interopPreprocessLists[i]));
-                    if (FAILED(localHr)) {
-                        error = hrError("CreateCommandList(interop preprocess)", localHr);
-                        return false;
-                    }
-                    impl_->interopPreprocessLists[i]->Close();
-
-                    localHr = impl_->d3d12Device->CreateCommandAllocator(
-                        D3D12_COMMAND_LIST_TYPE_DIRECT,
-                        IID_PPV_ARGS(&impl_->interopPackAllocators[i]));
-                    if (FAILED(localHr)) {
-                        error = hrError("CreateCommandAllocator(interop pack)", localHr);
-                        return false;
-                    }
-                    localHr = impl_->d3d12Device->CreateCommandList(
-                        0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                        impl_->interopPackAllocators[i].Get(), nullptr,
-                        IID_PPV_ARGS(&impl_->interopPackLists[i]));
-                    if (FAILED(localHr)) {
-                        error = hrError("CreateCommandList(interop pack)", localHr);
-                        return false;
-                    }
-                    impl_->interopPackLists[i]->Close();
+                localHr = impl_->d3d12Device->CreateCommandList(
+                    0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    impl_->interopPreprocessAllocators[i].Get(), nullptr,
+                    IID_PPV_ARGS(&impl_->interopPreprocessLists[i]));
+                if (FAILED(localHr)) {
+                    error = hrError("CreateCommandList(interop preprocess)", localHr);
+                    return false;
                 }
+                impl_->interopPreprocessLists[i]->Close();
+
+                localHr = impl_->d3d12Device->CreateCommandAllocator(
+                    D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    IID_PPV_ARGS(&impl_->interopPackAllocators[i]));
+                if (FAILED(localHr)) {
+                    error = hrError("CreateCommandAllocator(interop pack)", localHr);
+                    return false;
+                }
+                localHr = impl_->d3d12Device->CreateCommandList(
+                    0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    impl_->interopPackAllocators[i].Get(), nullptr,
+                    IID_PPV_ARGS(&impl_->interopPackLists[i]));
+                if (FAILED(localHr)) {
+                    error = hrError("CreateCommandList(interop pack)", localHr);
+                    return false;
+                }
+                impl_->interopPackLists[i]->Close();
             }
 
             const D3D12_RESOURCE_DESC inputDesc = impl_->interopInputD3d12->GetDesc();
             impl_->d3d12Device->GetCopyableFootprints(
-                &inputDesc, 0, 2, 0,
+                &inputDesc, 0, 1, 0,
                 impl_->interopInputFootprints,
                 impl_->interopInputRows,
                 impl_->interopInputRowBytes,
                 &impl_->interopInputTotalBytes);
             const D3D12_RESOURCE_DESC outputDesc = impl_->interopOutputD3d12[0]->GetDesc();
             impl_->d3d12Device->GetCopyableFootprints(
-                &outputDesc, 0, 2, 0,
+                &outputDesc, 0, 1, 0,
                 impl_->interopOutputFootprints,
                 impl_->interopOutputRows,
                 impl_->interopOutputRowBytes,
@@ -1499,7 +1700,7 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                 error);
             if (!impl_->gpuInputPitched || !impl_->gpuOutputPitched) {
-                if (error.empty()) error = "D3D11/D3D12 interop buffer creation failed";
+                if (error.empty()) error = "D3D11/D3D12 BGRA interop buffer creation failed";
                 return false;
             }
             impl_->d3d11InteropReady = true;
@@ -1602,37 +1803,49 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
 
         } else {
             auto* sourceTexture = static_cast<ID3D11Texture2D*>(d3d11SourceTexture);
-            const UINT sourceSubresource = D3D11CalcSubresource(
-                0, static_cast<UINT>(d3d11SourceArraySlice), 1);
-            impl_->interopD3d11Context->CopySubresourceRegion(
-                impl_->interopInputD3d11.Get(), 0, 0, 0, 0,
-                sourceTexture, sourceSubresource, nullptr);
-            if (impl_->interopGpuFenceReady) {
-                const UINT64 inputReady = ++impl_->fenceValue;
-                HRESULT syncHr = impl_->interopD3d11Context4->Signal(
-                    impl_->interopFence11.Get(), inputReady);
-                if (FAILED(syncHr)) {
-                    error = hrError("ID3D11DeviceContext4::Signal(input)", syncHr);
-                    return false;
-                }
-                impl_->interopD3d11Context->Flush();
-                syncHr = impl_->dmlQueue->Wait(impl_->fence.Get(), inputReady);
-                if (FAILED(syncHr)) {
-                    error = hrError("ID3D12CommandQueue::Wait(input)", syncHr);
-                    return false;
-                }
-            } else {
-                impl_->interopD3d11Context->End(impl_->interopCopyQuery.Get());
-                impl_->interopD3d11Context->Flush();
-                HRESULT queryHr = S_FALSE;
-                while ((queryHr = impl_->interopD3d11Context->GetData(
-                            impl_->interopCopyQuery.Get(), nullptr, 0, 0)) == S_FALSE) {
-                    SwitchToThread();
-                }
-                if (FAILED(queryHr)) {
-                    error = hrError("D3D11 interop copy synchronization", queryHr);
-                    return false;
-                }
+            D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC sourceViewDesc{};
+            sourceViewDesc.FourCC = 0;
+            sourceViewDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+            sourceViewDesc.Texture2D.MipSlice = 0;
+            sourceViewDesc.Texture2D.ArraySlice =
+                static_cast<UINT>(d3d11SourceArraySlice);
+            ComPtr<ID3D11VideoProcessorInputView> sourceView;
+            HRESULT videoHr = impl_->interopVideoDevice->CreateVideoProcessorInputView(
+                sourceTexture,
+                impl_->interopVideoEnumerator.Get(),
+                &sourceViewDesc,
+                &sourceView);
+            if (FAILED(videoHr) || !sourceView) {
+                error = hrError("CreateVideoProcessorInputView(decoder NV12)", videoHr);
+                return false;
+            }
+
+            D3D11_VIDEO_PROCESSOR_STREAM stream{};
+            stream.Enable = TRUE;
+            stream.OutputIndex = 0;
+            stream.InputFrameOrField = 0;
+            stream.pInputSurface = sourceView.Get();
+            videoHr = impl_->interopVideoContext->VideoProcessorBlt(
+                impl_->interopVideoProcessor.Get(),
+                impl_->interopInputBgraOutputView.Get(),
+                0, 1, &stream);
+            if (FAILED(videoHr)) {
+                error = hrError("VideoProcessorBlt(NV12->BGRA)", videoHr);
+                return false;
+            }
+
+            const UINT64 inputReady = ++impl_->fenceValue;
+            HRESULT syncHr = impl_->interopD3d11Context4->Signal(
+                impl_->interopFence11.Get(), inputReady);
+            if (FAILED(syncHr)) {
+                error = hrError("ID3D11DeviceContext4::Signal(input)", syncHr);
+                return false;
+            }
+            impl_->interopD3d11Context->Flush();
+            syncHr = impl_->dmlQueue->Wait(impl_->fence.Get(), inputReady);
+            if (FAILED(syncHr)) {
+                error = hrError("ID3D12CommandQueue::Wait(input)", syncHr);
+                return false;
             }
         }
 
@@ -1699,18 +1912,15 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
                 impl_->gpuRgbaState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
             }
 
-            for (UINT plane = 0; plane < 2; ++plane) {
-                D3D12_TEXTURE_COPY_LOCATION dst{};
-                dst.pResource = impl_->gpuInputPitched.Get();
-                dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-                dst.PlacedFootprint = impl_->interopInputFootprints[plane];
-                D3D12_TEXTURE_COPY_LOCATION src{};
-                src.pResource = impl_->interopInputD3d12.Get();
-                src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                src.SubresourceIndex = plane;
-                preprocessList->CopyTextureRegion(
-                    &dst, 0, 0, 0, &src, nullptr);
-            }
+            D3D12_TEXTURE_COPY_LOCATION dst{};
+            dst.pResource = impl_->gpuInputPitched.Get();
+            dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            dst.PlacedFootprint = impl_->interopInputFootprints[0];
+            D3D12_TEXTURE_COPY_LOCATION src{};
+            src.pResource = impl_->interopInputD3d12.Get();
+            src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            src.SubresourceIndex = 0;
+            preprocessList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
             D3D12_RESOURCE_BARRIER inputBarriers[2]{};
             inputBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1727,7 +1937,7 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
             impl_->interopInputD3d12State = D3D12_RESOURCE_STATE_COMMON;
             impl_->gpuInputPitchedState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
-            preprocessList->SetPipelineState(impl_->nv12PitchedToRgbaPso.Get());
+            preprocessList->SetPipelineState(impl_->bgraPitchedToRgbaPso.Get());
             preprocessList->SetComputeRootSignature(impl_->interopRootSignature.Get());
             preprocessList->SetComputeRootShaderResourceView(
                 0, impl_->gpuInputPitched->GetGPUVirtualAddress());
@@ -1737,9 +1947,8 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
                 static_cast<UINT>(impl_->width),
                 static_cast<UINT>(impl_->height),
                 static_cast<UINT>(impl_->interopInputFootprints[0].Offset),
-                static_cast<UINT>(impl_->interopInputFootprints[1].Offset),
                 impl_->interopInputFootprints[0].Footprint.RowPitch,
-                impl_->interopInputFootprints[1].Footprint.RowPitch};
+                0, 0};
             preprocessList->SetComputeRoot32BitConstants(2, 6, interopDims, 0);
             preprocessList->Dispatch(
                 static_cast<UINT>((impl_->width + 15) / 16),
@@ -1996,8 +2205,6 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
             const size_t outputSlot = interopSlot;
             ID3D12Resource* const interopOutput12 =
                 impl_->interopOutputD3d12[outputSlot].Get();
-            ID3D11Texture2D* const interopOutput11 =
-                impl_->interopOutputD3d11[outputSlot].Get();
             D3D12_RESOURCE_STATES& interopOutputState =
                 impl_->interopOutputD3d12State[outputSlot];
 
@@ -2012,7 +2219,7 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
                 impl_->gpuOutputPitchedState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
             }
 
-            packList->SetPipelineState(impl_->rgbaToNv12PitchedPso.Get());
+            packList->SetPipelineState(impl_->rgbaToBgraPitchedPso.Get());
             packList->SetComputeRootSignature(impl_->interopRootSignature.Get());
             packList->SetComputeRootShaderResourceView(
                 0, impl_->gpuPackedRgba->GetGPUVirtualAddress());
@@ -2022,16 +2229,13 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
                 static_cast<UINT>(impl_->width),
                 static_cast<UINT>(impl_->height),
                 static_cast<UINT>(impl_->interopOutputFootprints[0].Offset),
-                static_cast<UINT>(impl_->interopOutputFootprints[1].Offset),
                 impl_->interopOutputFootprints[0].Footprint.RowPitch,
-                impl_->interopOutputFootprints[1].Footprint.RowPitch};
+                0, 0};
             packList->SetComputeRoot32BitConstants(2, 6, outputDims, 0);
-            const size_t yWordsPerRow = (static_cast<size_t>(impl_->width) + 3u) / 4u;
-            const size_t outputWords =
-                yWordsPerRow * static_cast<size_t>(impl_->height) +
-                yWordsPerRow * static_cast<size_t>(impl_->height / 2);
             packList->Dispatch(
-                static_cast<UINT>((outputWords + 255u) / 256u), 1, 1);
+                static_cast<UINT>((impl_->width + 15) / 16),
+                static_cast<UINT>((impl_->height + 15) / 16),
+                1);
 
             D3D12_RESOURCE_BARRIER outputBarriers[3]{};
             outputBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -2050,17 +2254,15 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
             impl_->gpuOutputPitchedState = D3D12_RESOURCE_STATE_COPY_SOURCE;
             interopOutputState = D3D12_RESOURCE_STATE_COPY_DEST;
 
-            for (UINT plane = 0; plane < 2; ++plane) {
-                D3D12_TEXTURE_COPY_LOCATION src{};
-                src.pResource = impl_->gpuOutputPitched.Get();
-                src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-                src.PlacedFootprint = impl_->interopOutputFootprints[plane];
-                D3D12_TEXTURE_COPY_LOCATION dst{};
-                dst.pResource = interopOutput12;
-                dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                dst.SubresourceIndex = plane;
-                packList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-            }
+            D3D12_TEXTURE_COPY_LOCATION src{};
+            src.pResource = impl_->gpuOutputPitched.Get();
+            src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            src.PlacedFootprint = impl_->interopOutputFootprints[0];
+            D3D12_TEXTURE_COPY_LOCATION dst{};
+            dst.pResource = interopOutput12;
+            dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst.SubresourceIndex = 0;
+            packList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
             D3D12_RESOURCE_BARRIER handoffBarriers[3]{};
             handoffBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -2085,64 +2287,124 @@ bool RvmOrt::runGpuCompositeNv12(RvmGpuCompositeMode outputMode,
 
             hr = packList->Close();
             if (FAILED(hr)) {
-                error = hrError("commandList->Close(alpha-pack-d3d11)", hr);
+                error = hrError("commandList->Close(alpha-pack-d3d11-bgra)", hr);
                 return false;
             }
             ID3D12CommandList* packLists[]{packList};
             impl_->dmlQueue->ExecuteCommandLists(1, packLists);
 
-            if (impl_->interopGpuFenceReady) {
-                const UINT64 outputReady = ++impl_->fenceValue;
-                HRESULT syncHr = impl_->dmlQueue->Signal(
-                    impl_->fence.Get(), outputReady);
-                if (FAILED(syncHr)) {
-                    error = hrError("ID3D12CommandQueue::Signal(output)", syncHr);
-                    return false;
-                }
-                syncHr = impl_->interopD3d11Context4->Wait(
-                    impl_->interopFence11.Get(), outputReady);
-                if (FAILED(syncHr)) {
-                    error = hrError("ID3D11DeviceContext4::Wait(output)", syncHr);
-                    return false;
-                }
-
-                if (d3d11DestinationTexture) {
-                    auto* destinationTexture =
-                        static_cast<ID3D11Texture2D*>(d3d11DestinationTexture);
-                    impl_->interopD3d11Context->CopySubresourceRegion(
-                        destinationTexture,
-                        D3D11CalcSubresource(
-                            0, static_cast<UINT>(d3d11DestinationArraySlice), 1),
-                        0, 0, 0, interopOutput11, 0, nullptr);
-                    const UINT64 destinationReady = ++impl_->fenceValue;
-                    syncHr = impl_->interopD3d11Context4->Signal(
-                        impl_->interopFence11.Get(), destinationReady);
-                    if (FAILED(syncHr)) {
-                        error = hrError("ID3D11DeviceContext4::Signal(output copy)", syncHr);
-                        return false;
-                    }
-                    impl_->interopD3d11Context->Flush();
-                    impl_->interopFrameCompleteValues[outputSlot] = destinationReady;
-                } else {
-                    // Compatibility callers that only request the shared texture
-                    // keep the old completion semantics.
-                    if (!waitForGpu()) return false;
-                }
-            } else {
-                if (!waitForGpu()) return false;
-                if (d3d11DestinationTexture) {
-                    auto* destinationTexture =
-                        static_cast<ID3D11Texture2D*>(d3d11DestinationTexture);
-                    impl_->interopD3d11Context->CopySubresourceRegion(
-                        destinationTexture,
-                        D3D11CalcSubresource(
-                            0, static_cast<UINT>(d3d11DestinationArraySlice), 1),
-                        0, 0, 0, interopOutput11, 0, nullptr);
-                    impl_->interopD3d11Context->Flush();
-                }
+            const UINT64 outputReady = ++impl_->fenceValue;
+            HRESULT syncHr = impl_->dmlQueue->Signal(
+                impl_->fence.Get(), outputReady);
+            if (FAILED(syncHr)) {
+                error = hrError("ID3D12CommandQueue::Signal(output)", syncHr);
+                return false;
+            }
+            syncHr = impl_->interopD3d11Context4->Wait(
+                impl_->interopFence11.Get(), outputReady);
+            if (FAILED(syncHr)) {
+                error = hrError("ID3D11DeviceContext4::Wait(output)", syncHr);
+                return false;
             }
 
-            if (d3d11OutputTexture) *d3d11OutputTexture = interopOutput11;
+            ID3D11Texture2D* nv12Target = nullptr;
+            ComPtr<ID3D11VideoProcessorOutputView> targetView;
+            if (d3d11DestinationTexture) {
+                auto* destinationTexture =
+                    static_cast<ID3D11Texture2D*>(d3d11DestinationTexture);
+                D3D11_TEXTURE2D_DESC destinationDesc{};
+                destinationTexture->GetDesc(&destinationDesc);
+                if (destinationDesc.Format != DXGI_FORMAT_NV12 ||
+                    static_cast<int>(destinationDesc.Width) != impl_->width ||
+                    static_cast<int>(destinationDesc.Height) != impl_->height) {
+                    error = "D3D11 encoder destination must be NV12 and match video size";
+                    return false;
+                }
+                D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC targetDesc{};
+                if (destinationDesc.ArraySize > 1) {
+                    targetDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2DARRAY;
+                    targetDesc.Texture2DArray.MipSlice = 0;
+                    targetDesc.Texture2DArray.FirstArraySlice =
+                        static_cast<UINT>(d3d11DestinationArraySlice);
+                    targetDesc.Texture2DArray.ArraySize = 1;
+                } else {
+                    targetDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+                    targetDesc.Texture2D.MipSlice = 0;
+                }
+                HRESULT viewHr = impl_->interopVideoDevice->CreateVideoProcessorOutputView(
+                    destinationTexture,
+                    impl_->interopVideoEnumerator.Get(),
+                    &targetDesc,
+                    &targetView);
+                if (FAILED(viewHr) || !targetView) {
+                    error = hrError("CreateVideoProcessorOutputView(encoder NV12)", viewHr);
+                    return false;
+                }
+                nv12Target = destinationTexture;
+            } else if (d3d11OutputTexture) {
+                if (!impl_->interopCompatNv12Textures[outputSlot]) {
+                    D3D11_TEXTURE2D_DESC compatDesc{};
+                    compatDesc.Width = static_cast<UINT>(impl_->width);
+                    compatDesc.Height = static_cast<UINT>(impl_->height);
+                    compatDesc.MipLevels = 1;
+                    compatDesc.ArraySize = 1;
+                    compatDesc.Format = DXGI_FORMAT_NV12;
+                    compatDesc.SampleDesc.Count = 1;
+                    compatDesc.Usage = D3D11_USAGE_DEFAULT;
+                    compatDesc.BindFlags = D3D11_BIND_RENDER_TARGET;
+                    HRESULT createHr = impl_->interopD3d11Device->CreateTexture2D(
+                        &compatDesc, nullptr,
+                        &impl_->interopCompatNv12Textures[outputSlot]);
+                    if (FAILED(createHr)) {
+                        error = hrError("CreateTexture2D(compat NV12)", createHr);
+                        return false;
+                    }
+                    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC compatViewDesc{};
+                    compatViewDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+                    compatViewDesc.Texture2D.MipSlice = 0;
+                    createHr = impl_->interopVideoDevice->CreateVideoProcessorOutputView(
+                        impl_->interopCompatNv12Textures[outputSlot].Get(),
+                        impl_->interopVideoEnumerator.Get(),
+                        &compatViewDesc,
+                        &impl_->interopCompatNv12OutputViews[outputSlot]);
+                    if (FAILED(createHr)) {
+                        error = hrError("CreateVideoProcessorOutputView(compat NV12)", createHr);
+                        return false;
+                    }
+                }
+                nv12Target = impl_->interopCompatNv12Textures[outputSlot].Get();
+                targetView = impl_->interopCompatNv12OutputViews[outputSlot];
+            }
+
+            if (!targetView) {
+                error = "D3D11 GPU interop requires an encoder destination or output texture";
+                return false;
+            }
+
+            D3D11_VIDEO_PROCESSOR_STREAM stream{};
+            stream.Enable = TRUE;
+            stream.OutputIndex = 0;
+            stream.InputFrameOrField = 0;
+            stream.pInputSurface = impl_->interopOutputBgraInputViews[outputSlot].Get();
+            HRESULT videoHr = impl_->interopVideoContext->VideoProcessorBlt(
+                impl_->interopVideoProcessor.Get(),
+                targetView.Get(), 0, 1, &stream);
+            if (FAILED(videoHr)) {
+                error = hrError("VideoProcessorBlt(BGRA->NV12)", videoHr);
+                return false;
+            }
+
+            const UINT64 destinationReady = ++impl_->fenceValue;
+            syncHr = impl_->interopD3d11Context4->Signal(
+                impl_->interopFence11.Get(), destinationReady);
+            if (FAILED(syncHr)) {
+                error = hrError("ID3D11DeviceContext4::Signal(output conversion)", syncHr);
+                return false;
+            }
+            impl_->interopD3d11Context->Flush();
+            impl_->interopFrameCompleteValues[outputSlot] = destinationReady;
+
+            if (d3d11OutputTexture) *d3d11OutputTexture = nv12Target;
             return true;
         }
 
@@ -2274,4 +2536,5 @@ bool RvmOrt::runAlphaPackedNv12(RvmAlphaInputFormat inputFormat,
         d3d11DestinationTexture,
         d3d11DestinationArraySlice);
 }
+
 

@@ -72,12 +72,6 @@ public:
     bool SetAiPrewarm(bool enabled, const std::filesystem::path& media_file,
                       AiBackend ai_backend, int directml_device);
     bool IsAiPrewarmReady() const;
-    // While the server is running, AI ON/OFF and output-mode selection are
-    // pending only. The active stream keeps its current state until the next
-    // file change or explicit zero seek starts a new RUN.
-    void SetAiPassthroughMode(bool enabled, AiOutputMode mode);
-    void SetAiOutputMode(AiOutputMode mode);
-
     bool IsRunning() const { return running_.load(); }
     uint16_t Port() const { return http_port_; }
     std::string AdvertisedIp() const;
@@ -169,17 +163,8 @@ private:
     std::vector<DirectoryItem> directory_items_;
     std::string advertised_ip_;
     std::string uuid_;
-    // ai_passthrough_ is the state used for new media requests. The GUI can
-    // queue a different ON/OFF state without mutating an in-flight stream.
-    std::atomic<bool> ai_passthrough_{false};
-    mutable std::mutex ai_mode_mutex_;
-    bool selected_ai_passthrough_{false};
-    bool ai_passthrough_change_pending_{false};
-    // ai_output_mode_ is the UI-selected mode. active_ai_output_mode_ is the
-    // mode used by the current RUN.
-    AiOutputMode ai_output_mode_{AiOutputMode::AlphaPackedHevc};
-    AiOutputMode active_ai_output_mode_{AiOutputMode::AlphaPackedHevc};
-    bool ai_output_mode_change_pending_{false};
+    // Playback snapshot: 0=Alpha Packed, 1=Alpha WebM, 2=Chroma Key, 3=OFF.
+    std::atomic<int> active_ai_mode_{3};
     uint32_t active_ai_media_id_{0};
     AiBackend ai_backend_{AiBackend::NvidiaCuda};
     int directml_device_{0};
@@ -207,4 +192,5 @@ private:
     mutable std::mutex ai_error_callback_mutex_;
     std::function<void(const AiErrorInfo&)> ai_error_callback_;
 };
+
 
