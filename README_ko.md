@@ -2,6 +2,9 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 1.1 : 다양한 버그 수정 및 개선.
+PICO/Meta용 클라이언트 r800zzvrplayer 1.3에도 다양한 버그 수정 및 개선 사항이 포함되어 있습니다.
+파일 다운로드 및 이미지 보기 기능에 대한 서버 측 지원이 추가되었습니다(클라이언트로 r800zzvrplayer 1.3 필요).
 ### Ver 0.9 : DLNA의 대안으로 새로운 "Direct HTTP" 모드(r800zzvrplayer 1.1용)를 추가했습니다.
 UDP 1900 포트를 사용할 수 없는 환경에서도 URL을 입력하여 동영상을 재생하고 파일을 다운로드할 수 있습니다.
 ### Ver 0.9 : DLNA 서버의 네트워크 어댑터 선택 우선순위를 개선했습니다.
