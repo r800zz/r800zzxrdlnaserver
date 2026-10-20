@@ -1486,7 +1486,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                    L"R800ZZDlnaServerWindow", nullptr};
     RegisterClassExW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName,
-                              L"r800zzXRdlnaServer 1.0",
+                              L"r800zzXRdlnaServer 1.1",
                               WS_OVERLAPPEDWINDOW, 100, 100, 820, 720,
                               nullptr, nullptr, wc.hInstance, nullptr);
 
@@ -2022,6 +2022,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         // All four modes may be selected while the server is running. The
         // current RUN is left untouched; the selection is applied only at the
         // next file change or explicit zero seek.
+        if (server.IsRunning()) ImGui::BeginDisabled();
         ImGui::RadioButton("Alpha packed", &ai_stream_mode, 0);
         ImGui::SameLine();
         ImGui::RadioButton("Alpha WebM VP9", &ai_stream_mode, 1);
@@ -2029,6 +2030,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         ImGui::RadioButton("Chroma Key", &ai_stream_mode, 2);
         ImGui::SameLine();
         ImGui::RadioButton("OFF", &ai_stream_mode, 3);
+        if (server.IsRunning()) ImGui::EndDisabled();
 
         if (ai_stream_mode != previousAiStreamMode) {
             g_selected_ai_mode.store(ai_stream_mode, std::memory_order_relaxed);
@@ -2084,7 +2086,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
           const bool backendReady = !aiNeedsBackend ||
             (ai_backend == 1 ? directml_adapter_choice >= 0 : true);
           const bool can_start = backendReady &&
-            !selected_files.empty() && selected_address >= 0 && !conversionRunning;
+            (!selected_files.empty() || !selected_folder.empty()) &&
+            selected_address >= 0 && !conversionRunning;
 
             if (!can_start) ImGui::BeginDisabled();
             ImGui::PushStyleColor(ImGuiCol_Button,
@@ -2094,6 +2097,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             ImGui::PushStyleColor(ImGuiCol_ButtonActive,
                 ImVec4(245.0f / 255.0f, 170.0f / 255.0f, 184.0f / 255.0f, 1.0f));
             if (ImGui::Button(uiText.startServer, ImVec2(180, 0))) {
+                // Refresh the selected folder at the moment the server starts.
+                if (!selected_folder.empty()) {
+                    folder_files = DlnaServer::FindFiles(selected_folder, video_files_only);
+                    rebuildSelectedFiles();
+                }
                 const bool aiEnabled = aiPassthroughEnabled();
                 server.Start(
                     selected_files,

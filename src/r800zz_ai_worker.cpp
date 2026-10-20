@@ -1062,6 +1062,10 @@ struct Pipeline {
             return false;
         }
         outFmt->flags |= AVFMT_FLAG_FLUSH_PACKETS;
+        // Do not let live WebM wait for another video packet after the video track ends.
+        if (webmAlphaOutput && !args.offlineConvert) {
+            outFmt->max_interleave_delta = 100000; // 100 ms, in AV_TIME_BASE units.
+        }
 
         const AVCodec* encoder = webmAlphaOutput
             ? avcodec_find_encoder_by_name("libvpx-vp9")
@@ -1757,6 +1761,26 @@ struct Pipeline {
     bool drainPendingAudio(std::string& error) {
         if (!videoOutputStarted) return true;
 
+        // Source video duration, when known, allows audio past video EOF to
+        // keep flowing without waiting for the entire input to reach EOF.
+        bool webmAudioTail = false;
+        if (args.outputMode == Args::OutputMode::WebmVp9Alpha &&
+            !args.offlineConvert && inVideo &&
+            inVideo->duration != AV_NOPTS_VALUE && inVideo->duration > 0) {
+            const int64_t videoEndTs =
+                (inVideo->start_time == AV_NOPTS_VALUE ? 0 : inVideo->start_time) +
+                inVideo->duration;
+            const int64_t videoEndUs = av_rescale_q(
+                videoEndTs, inVideo->time_base, AV_TIME_BASE_Q);
+            for (const AVPacket* pending : pendingAudioPackets) {
+                const int64_t pendingUs = audioPacketTimestampUs(pending);
+                if (pendingUs != AV_NOPTS_VALUE && pendingUs >= videoEndUs) {
+                    webmAudioTail = true;
+                    break;
+                }
+            }
+        }
+
         while (!pendingAudioPackets.empty()) {
             AVPacket* packet = pendingAudioPackets.front();
             const int64_t audioUs = audioPacketTimestampUs(packet);
@@ -1773,7 +1797,7 @@ struct Pipeline {
             // Keep audio behind the latest completed video packet. This makes
             // video the master clock instead of allowing demuxed audio to run
             // several seconds ahead while RVM/NVENC is busy.
-            if (latestVideoOutputUs != AV_NOPTS_VALUE &&
+            if (!webmAudioTail && latestVideoOutputUs != AV_NOPTS_VALUE &&
                 audioUs != AV_NOPTS_VALUE && audioUs > latestVideoOutputUs) {
                 break;
             }
@@ -2589,4 +2613,5 @@ int main(int argc, char** argv) {
     logLine("completed");
     return 0;
 }
+
 
