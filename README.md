@@ -137,8 +137,8 @@ Not knowing the video duration is also inconvenient.
 For this reason, the r800zzvrplayer video player uses file emulation so that the stream can be handled like a normal file, allowing seeking and displaying the video duration.  
 This optimized file emulation was possible because the DLNA server and the video player were developed by the same developer.  
 r800zzvrplayer has a special communication mode with r800zzXRdlnaServer, allowing optimized operation between the two applications.  
-File emulation has also been implemented for DeoVR, but because all compatibility handling must be performed on the server side, optimization is more difficult.  
-As a result, response times are longer with DeoVR.
+In many cases, video players other than r800zzvrplayer cannot seek to arbitrary positions in a video or determine its duration.  
+Making a live stream appear as a regular video file is difficult to achieve through server-side changes alone.
 
 ## Features
 
