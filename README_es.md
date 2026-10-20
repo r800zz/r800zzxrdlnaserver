@@ -135,6 +135,8 @@ No conocer la duración del vídeo también resulta inconveniente.
 Por este motivo, el reproductor r800zzvrplayer utiliza emulación de archivos para que el flujo pueda tratarse como un archivo normal, permitiendo realizar búsquedas y mostrar la duración del vídeo.  
 Esta emulación de archivos optimizada fue posible porque el servidor DLNA y el reproductor de vídeo fueron desarrollados por el mismo desarrollador.  
 r800zzvrplayer dispone de un modo de comunicación especial con r800zzXRdlnaServer que permite un funcionamiento optimizado entre ambas aplicaciones.  
+En muchos casos, los reproductores de vídeo distintos de r800zzvrplayer no pueden desplazarse a una posición arbitraria del vídeo ni determinar su duración.  
+Es difícil hacer que una transmisión en directo se comporte como un archivo de vídeo normal únicamente mediante cambios en el servidor.
 
 ## Funciones
 
