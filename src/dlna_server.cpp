@@ -2068,7 +2068,8 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
                        AiOutputMode ai_output_mode,
                        AiBackend ai_backend,
                        int directml_device,
-                       bool video_files_only) {
+                       bool video_files_only,
+                       bool enable_ssdp) {
     Stop();
 
     if (media_files.empty()) {
@@ -2190,6 +2191,7 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
     ai_backend_ = ai_backend;
     directml_device_ = directml_device;
     video_files_only_ = video_files_only;
+    enable_ssdp_ = enable_ssdp;
 
     // CUDA/DirectML/CPU initialization starts only when the user starts the
     // DLNA server.  If AI Passthrough was requested, do not report Running
@@ -2293,21 +2295,23 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
     } else {
         SetAiPrewarm(false, {}, ai_backend_, directml_device_);
     }
-    uuid_ = MakeUuid();
+    // Preserve device identity across Stop()/Start() within this process.
 
     if (!SetupHttpListener()) {
         StopResidentAiWorker();
         SetStatus("Could not open an HTTP port.");
         return false;
     }
-    const bool ssdp_available = SetupSsdpSocket();
+    const bool ssdp_available = enable_ssdp_ && SetupSsdpSocket();
     const SsdpUiText& ssdpText = GetSsdpUiText(ui_language);
-    if (!ssdp_available) {
-        // Keep HTTP and UPnP control available for clients using a direct URL.
+    if (enable_ssdp_ && !ssdp_available) {
+        // Keep direct HTTP access available when SSDP is unavailable.
         AddLog(ssdpText.logError);
     }
     running_ = true;
-    SetStatus(ssdp_available ? ssdpText.running : ssdpText.statusError);
+    SetStatus(!enable_ssdp_ ? "Running (Direct HTTP only)" :
+              (ssdp_available ? ssdpText.running : ssdpText.statusError));
+    AddLog(enable_ssdp_ ? "Discovery: DLNA/Direct HTTP" : "Discovery: Direct HTTP only (SSDP disabled)");
     AddLog("DLNA server started: http://" + advertised_ip_ + ":" +
            std::to_string(http_port_) + "/media/<id>");
     AddLog(std::string(video_files_only_ ? "Video files: " : "Shared files: ") +
@@ -2330,7 +2334,7 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
 void DlnaServer::Stop() {
     const bool was_running = running_.exchange(false);
 
-    if (was_running) {
+    if (was_running && ssdp_socket_ != INVALID_SOCKET) {
         SendByebyeNotifications();
     }
 

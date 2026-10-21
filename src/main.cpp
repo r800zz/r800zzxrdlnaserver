@@ -616,6 +616,49 @@ static std::filesystem::path SettingsFilePath() {
            L"settings.json";
 }
 
+static std::filesystem::path DlnaDiscoveryModeFilePath() {
+    const std::filesystem::path settings = SettingsFilePath();
+    if (settings.empty()) return {};
+    return settings.parent_path() / L"dlna_discovery_mode.dat";
+}
+
+static int LoadDlnaDiscoveryModeSelection() {
+    const std::filesystem::path path = DlnaDiscoveryModeFilePath();
+    if (path.empty()) return 0;
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return 0;
+    std::string value;
+    std::getline(stream, value);
+    if (!value.empty() && value.back() == '\r') value.pop_back();
+    return value == "direct-http-only" ? 1 : 0;
+}
+
+static bool SaveDlnaDiscoveryModeSelection(int mode) {
+    if (mode != 0 && mode != 1) return false;
+    const std::filesystem::path path = DlnaDiscoveryModeFilePath();
+    if (path.empty()) return false;
+
+    std::error_code filesystemError;
+    std::filesystem::create_directories(path.parent_path(), filesystemError);
+    if (filesystemError) return false;
+
+    std::filesystem::path temporary = path;
+    temporary += L".tmp";
+    {
+        std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+        if (!stream) return false;
+        stream << (mode == 1 ? "direct-http-only" : "dlna-direct-http") << "\n";
+        stream.flush();
+        if (!stream) return false;
+    }
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    return true;
+}
+
 static std::filesystem::path MediaSelectionFilePath() {
     const std::filesystem::path settings = SettingsFilePath();
     if (settings.empty()) return {};
@@ -1486,7 +1529,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                    L"R800ZZDlnaServerWindow", nullptr};
     RegisterClassExW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName,
-                              L"r800zzXRdlnaServer 1.1",
+                              L"r800zzXRdlnaServer 1.2",
                               WS_OVERLAPPEDWINDOW, 100, 100, 820, 720,
                               nullptr, nullptr, wc.hInstance, nullptr);
 
@@ -1625,6 +1668,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             });
     };
     bool video_files_only = LoadVideoFilesOnlySelection();
+    int dlna_discovery_mode = LoadDlnaDiscoveryModeSelection(); // 0: DLNA/Direct HTTP, 1: Direct HTTP only
     std::filesystem::path selected_folder;
     std::vector<std::filesystem::path> folder_files;
     std::vector<std::filesystem::path> individually_selected_files;
@@ -2110,7 +2154,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                     selectedAiOutputMode(),
                     selectedAiBackend(),
                     selectedDirectMlDevice(),
-                    video_files_only);
+                    video_files_only,
+                    dlna_discovery_mode == 0);
             }
             ImGui::PopStyleColor(3);
             if (!can_start) ImGui::EndDisabled();
@@ -2128,6 +2173,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         }
 
         ImGui::SameLine();
+        if (server.IsRunning()) ImGui::BeginDisabled();
+        const bool dlnaModeChanged =
+            ImGui::RadioButton("DLNA/Direct HTTP", &dlna_discovery_mode, 0);
+        ImGui::SameLine();
+        const bool httpOnlyChanged =
+            ImGui::RadioButton("Direct HTTP only", &dlna_discovery_mode, 1);
+        if (dlnaModeChanged || httpOnlyChanged) {
+            SaveDlnaDiscoveryModeSelection(dlna_discovery_mode);
+        }
+        if (server.IsRunning()) ImGui::EndDisabled();
         ImGui::Text("%s: %s", uiText.status, server.Status().c_str());
 
         if (g_aiErrorText.empty()) {
@@ -2455,6 +2510,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
     SaveAiStreamModeSelection(g_selected_ai_mode.load(std::memory_order_relaxed));
     SaveVideoFilesOnlySelection(video_files_only);
+    SaveDlnaDiscoveryModeSelection(dlna_discovery_mode);
     SaveConversionBackendSelection(conversion_backend);
     if (conversion_backend == 1 && conversion_directml_adapter_choice >= 0) {
         SaveConversionDirectMlAdapterSelection(

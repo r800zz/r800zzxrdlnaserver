@@ -63,7 +63,8 @@ public:
                bool ai_passthrough, AiOutputMode ai_output_mode,
                AiBackend ai_backend = AiBackend::NvidiaCuda,
                int directml_device = 0,
-               bool video_files_only = true);
+                bool video_files_only = true,
+               bool enable_ssdp = true);
     void Stop();
 
     // AI worker initialization starts from DLNA Server Start() when AI
@@ -169,6 +170,7 @@ private:
     AiBackend ai_backend_{AiBackend::NvidiaCuda};
     int directml_device_{0};
     bool video_files_only_{true};
+    bool enable_ssdp_{true};
 
     std::atomic<bool> running_{false};
     SOCKET http_listen_socket_{INVALID_SOCKET};
