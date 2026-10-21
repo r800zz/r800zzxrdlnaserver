@@ -6,8 +6,8 @@
 DLNA permite que dispositivos como los televisores inteligentes de tu red doméstica accedan a los archivos.  
 Direct HTTP te permite explorar los archivos de tu PC sin compartirlos con tu familia.
 ### Ver 1.1 : Numerosas correcciones de errores y mejoras.
-El cliente r800zzvrplayer 1.3 para PICO/Meta también incluye numerosas correcciones de errores y mejoras.
-Se añadió compatibilidad en el servidor para descargar archivos y visualizar imágenes (requiere r800zzvrplayer 1.3 como cliente).
+El cliente r800zzvrplayer 1.4 para PICO/Meta también incluye numerosas correcciones de errores y mejoras.
+Se añadió compatibilidad en el servidor para descargar archivos y visualizar imágenes (requiere r800zzvrplayer 1.4 como cliente).
 ### Ver 0.9 : Se ha añadido un nuevo modo "Direct HTTP" (con r800zzvrplayer 1.1) como alternativa a DLNA.
 Permite reproducir vídeos y descargar archivos introduciendo una URL, incluso si el puerto UDP 1900 no está disponible.
 ### Ver 0.9 : Se ha mejorado la prioridad de selección de los adaptadores de red del servidor DLNA.
