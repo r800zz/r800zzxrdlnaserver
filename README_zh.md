@@ -2,6 +2,9 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 1.2 : 新增“Direct HTTP only”功能。
+DLNA 允许家庭网络中的智能电视等设备访问文件。  
+Direct HTTP 让您无需与家人共享文件，也能浏览电脑上的文件。
 ### Ver 1.1 : 修复了大量错误并进行了多项改进。
 适用于 PICO/Meta 的客户端 r800zzvrplayer 1.3 也包含大量错误修复和改进。
 新增服务器端文件下载和图片查看支持（需要使用 r800zzvrplayer 1.3 作为客户端）。
