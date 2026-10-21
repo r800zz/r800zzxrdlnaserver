@@ -2,6 +2,9 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 1.2 : Se añadió la función «Direct HTTP only».
+DLNA permite que dispositivos como los televisores inteligentes de tu red doméstica accedan a los archivos.  
+Direct HTTP te permite explorar los archivos de tu PC sin compartirlos con tu familia.
 ### Ver 1.1 : Numerosas correcciones de errores y mejoras.
 El cliente r800zzvrplayer 1.3 para PICO/Meta también incluye numerosas correcciones de errores y mejoras.
 Se añadió compatibilidad en el servidor para descargar archivos y visualizar imágenes (requiere r800zzvrplayer 1.3 como cliente).
