@@ -2,6 +2,7 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 1.3 : Se añadió compatibilidad con formatos de vídeo que antes no eran compatibles. (Requiere r800zzvrplayer 1.5.)
 ### Ver 1.2 : Se añadió la función «Direct HTTP only».
 DLNA permite que dispositivos como los televisores inteligentes de tu red doméstica accedan a los archivos.  
 Direct HTTP te permite explorar los archivos de tu PC sin compartirlos con tu familia.
