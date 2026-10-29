@@ -27,6 +27,17 @@ cudaError_t r800zzNv12ToRgbHalfNchw(
     void* dstHalf,
     cudaStream_t stream);
 
+// Read P010 directly into the RVM FP16 tensor. Build an 8-bit NV12 surface
+// in the same pass only for the existing NV12-only output compositor.
+cudaError_t r800zzP010ToRgbHalfAndNv12(
+    const R800ZZGpuFrame& src, void* dstHalf,
+    const R800ZZGpuFrameMutable& dstNv12, cudaStream_t stream);
+
+// GPU-only compatibility conversion for P010 (10-bit) decoder surfaces.
+cudaError_t r800zzP010ToNv12(
+    const R800ZZGpuFrame& src, const R800ZZGpuFrameMutable& dst,
+    cudaStream_t stream);
+
 cudaError_t r800zzBuildProjectionMap(
     void* mapFloat2,
     int width,

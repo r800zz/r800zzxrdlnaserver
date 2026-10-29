@@ -26,6 +26,7 @@ int R800zzRunDmlResidentStream(
     const std::filesystem::path& input,
     int64_t start_ms,
     const std::string& output_mode,
+    const std::string& video_codec,
     HANDLE output,
     std::atomic<bool>* cancel_flag,
     std::string& error);

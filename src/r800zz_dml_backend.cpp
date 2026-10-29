@@ -224,6 +224,7 @@ struct Args {
 
     std::filesystem::path input;
     std::filesystem::path model;
+    std::string videoCodec = "hevc";
     int qp = 24;
     int device = -1;
     float downsample = 0.25f;
@@ -282,6 +283,13 @@ bool parseArgs(int argc, wchar_t** argv, Args& out) {
         } else if (a == L"--device") {
             const wchar_t* v = need(L"--device"); if (!v) return false;
             out.device = _wtoi(v);
+        } else if (a == L"--video-codec") {
+            const wchar_t* v = need(L"--video-codec"); if (!v) return false;
+            const std::wstring requested(v);
+            if (requested == L"h264") out.videoCodec = "h264";
+            else if (requested == L"hevc") out.videoCodec = "hevc";
+            else if (requested == L"av1") out.videoCodec = "av1";
+            else return false;
         } else if (a == L"--qp" || a == L"--crf") {
             const wchar_t* v = need(a.c_str()); if (!v) return false;
             out.qp = std::clamp(_wtoi(v), 0, 63);
@@ -703,7 +711,9 @@ struct Pipeline {
     bool initEncoderAndMuxer(std::string& error) {
         const bool webmAlphaOutput =
             args.outputMode == Args::OutputMode::WebmVp9Alpha;
-        const char* muxerName = webmAlphaOutput
+        const bool liveAv1Webm = !args.offlineConvert && !webmAlphaOutput &&
+            args.videoCodec == "av1";
+        const char* muxerName = (webmAlphaOutput || liveAv1Webm)
             ? "webm" : (args.offlineConvert ? "mp4" : "mpegts");
 
         const std::string outputPath = args.outputFile.empty()
@@ -721,16 +731,35 @@ struct Pipeline {
         std::vector<const char*> encoderCandidates;
         if (webmAlphaOutput) {
             encoderCandidates.push_back("libvpx-vp9");
-        } else if (args.backend == RvmBackend::DirectML) {
-            if (selectedVendorId == 0x10DE) encoderCandidates.push_back("hevc_nvenc");
-            if (selectedVendorId == 0x1002) encoderCandidates.push_back("hevc_amf");
-            if (selectedVendorId == 0x8086) encoderCandidates.push_back("hevc_qsv");
-            encoderCandidates.push_back("hevc_mf");
-            encoderCandidates.push_back("libx265");
         } else {
-            encoderCandidates = {
-                "libx265", "hevc_mf", "hevc_nvenc", "hevc_amf", "hevc_qsv"
-            };
+            // Restrict fallbacks to the requested codec, not a different format.
+            const bool hardwareFirst = args.backend == RvmBackend::DirectML;
+            if (args.videoCodec == "h264") {
+                if (hardwareFirst) {
+                    if (selectedVendorId == 0x10DE) encoderCandidates.push_back("h264_nvenc");
+                    if (selectedVendorId == 0x1002) encoderCandidates.push_back("h264_amf");
+                    if (selectedVendorId == 0x8086) encoderCandidates.push_back("h264_qsv");
+                    encoderCandidates.push_back("h264_mf");
+                }
+                encoderCandidates.push_back("libx264");
+                encoderCandidates.push_back("libopenh264");
+            } else if (args.videoCodec == "av1") {
+                if (hardwareFirst) {
+                    if (selectedVendorId == 0x10DE) encoderCandidates.push_back("av1_nvenc");
+                    if (selectedVendorId == 0x1002) encoderCandidates.push_back("av1_amf");
+                    if (selectedVendorId == 0x8086) encoderCandidates.push_back("av1_qsv");
+                }
+                encoderCandidates.push_back("libsvtav1");
+                encoderCandidates.push_back("libaom-av1");
+            } else {
+                if (hardwareFirst) {
+                    if (selectedVendorId == 0x10DE) encoderCandidates.push_back("hevc_nvenc");
+                    if (selectedVendorId == 0x1002) encoderCandidates.push_back("hevc_amf");
+                    if (selectedVendorId == 0x8086) encoderCandidates.push_back("hevc_qsv");
+                    encoderCandidates.push_back("hevc_mf");
+                }
+                encoderCandidates.push_back("libx265");
+            }
         }
 
         const AVCodec* chosenEncoder = nullptr;
@@ -844,7 +873,7 @@ struct Pipeline {
                 av_dict_set(&opts, "row-mt", "1", 0);
                 av_dict_set(&opts, "tile-columns", "2", 0);
                 av_dict_set(&opts, "error-resilient", "1", 0);
-            } else if (std::string(encoderName) == "hevc_nvenc") {
+            } else if ((std::string(encoderName) == "hevc_nvenc" || std::string(encoderName) == "h264_nvenc" || std::string(encoderName) == "av1_nvenc")) {
                 // Exactly the same low-latency policy as the CUDA worker.
                 av_dict_set(&opts, "preset", "p1", 0);
                 av_dict_set(&opts, "tune", "ull", 0);
@@ -948,14 +977,15 @@ struct Pipeline {
         }
         outVideo->time_base = enc->time_base;
         outVideo->codecpar->codec_tag = 0;
-        if (args.offlineConvert && !webmAlphaOutput) {
+        if (args.offlineConvert && !webmAlphaOutput &&
+            enc->codec_id == AV_CODEC_ID_HEVC) {
             outVideo->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
         }
         if (webmAlphaOutput) {
             av_dict_set(&outVideo->metadata, "alpha_mode", "1", 0);
         }
 
-        if (webmAlphaOutput && inAudio) {
+        if ((webmAlphaOutput || liveAv1Webm) && inAudio) {
             if (!initAudioTranscode(
                     AV_CODEC_ID_OPUS, "libopus",
                     AV_SAMPLE_FMT_FLT, error)) {
@@ -1026,7 +1056,7 @@ struct Pipeline {
         }
 
         AVDictionary* muxOpts = nullptr;
-        if (webmAlphaOutput && !args.offlineConvert) {
+        if ((webmAlphaOutput || liveAv1Webm) && !args.offlineConvert) {
             av_dict_set(&muxOpts, "live", "1", 0);
             av_dict_set(&muxOpts, "cluster_time_limit", "100", 0);
             av_dict_set(&muxOpts, "cluster_size_limit", "1048576", 0);
@@ -2734,6 +2764,7 @@ int R800zzRunDmlResidentStream(
     const std::filesystem::path& input,
     int64_t start_ms,
     const std::string& output_mode,
+    const std::string& video_codec,
     HANDLE output,
     std::atomic<bool>* cancel_flag,
     std::string& error) {
@@ -2752,6 +2783,7 @@ int R800zzRunDmlResidentStream(
     p.args.input = input;
     p.args.resident = false;
     p.args.previewOnly = false;
+    p.args.videoCodec = video_codec;
     p.args.startMs = std::max<int64_t>(0, start_ms);
     if (output_mode == "webm-alpha") {
         p.args.outputMode = Args::OutputMode::WebmVp9Alpha;

@@ -64,7 +64,8 @@ public:
                AiBackend ai_backend = AiBackend::NvidiaCuda,
                int directml_device = 0,
                 bool video_files_only = true,
-               bool enable_ssdp = true);
+               bool enable_ssdp = true,
+               const std::string& realtime_video_codec = "hevc");
     void Stop();
 
     // AI worker initialization starts from DLNA Server Start() when AI
@@ -168,6 +169,7 @@ private:
     std::atomic<int> active_ai_mode_{3};
     uint32_t active_ai_media_id_{0};
     AiBackend ai_backend_{AiBackend::NvidiaCuda};
+    std::string realtime_video_codec_{"hevc"};
     int directml_device_{0};
     bool video_files_only_{true};
     bool enable_ssdp_{true};

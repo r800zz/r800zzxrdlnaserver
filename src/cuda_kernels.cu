@@ -343,6 +343,80 @@ cudaError_t r800zzNv12ToRgbHalfNchw(const R800ZZGpuFrame& src, void* dstHalf, cu
     return cudaGetLastError();
 }
 
+__global__ void p010ToRgbHalfAndNv12Kernel(
+    R800ZZGpuFrame src, half* dstHalf, R800ZZGpuFrameMutable dstNv12) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= src.width || y >= src.height) return;
+
+    // P010 stores ten significant bits in the upper bits of each 16-bit word.
+    const auto* yRow = reinterpret_cast<const uint16_t*>(
+        src.y + static_cast<size_t>(y) * src.pitchY);
+    const auto* uvRow = reinterpret_cast<const uint16_t*>(
+        src.uv + static_cast<size_t>(y / 2) * src.pitchUV);
+    const unsigned int y10 = static_cast<unsigned int>(yRow[x]) >> 6;
+    const int uvx = (x / 2) * 2;
+    const unsigned int u10 = static_cast<unsigned int>(uvRow[uvx]) >> 6;
+    const unsigned int v10 = static_cast<unsigned int>(uvRow[uvx + 1]) >> 6;
+
+    // Limited-range BT.709 conversion in 10-bit precision; no NV12 staging
+    // is involved in the RVM input. The original project uses BT.709.
+    const float fy = (static_cast<float>(y10) - 64.0f) / 876.0f;
+    const float fu = (static_cast<float>(u10) - 512.0f) / 896.0f;
+    const float fv = (static_cast<float>(v10) - 512.0f) / 896.0f;
+    const float r = clamp01(fy + 1.5748f * fv);
+    const float g = clamp01(fy - 0.187324f * fu - 0.468124f * fv);
+    const float b = clamp01(fy + 1.8556f * fu);
+    const size_t plane = static_cast<size_t>(src.width) * src.height;
+    const size_t i = static_cast<size_t>(y) * src.width + x;
+    dstHalf[i] = __float2half(r);
+    dstHalf[plane + i] = __float2half(g);
+    dstHalf[plane * 2 + i] = __float2half(b);
+
+    // Existing alpha-packed/chroma-key/VP9 output code requires NV12.
+    // Produce it in this same pass, without a second conversion kernel.
+    dstNv12.y[static_cast<size_t>(y) * dstNv12.pitchY + x] =
+        static_cast<uint8_t>(min(255u, (y10 + 2u) >> 2));
+    if ((x & 1) == 0 && (y & 1) == 0) {
+        auto* out = dstNv12.uv + static_cast<size_t>(y / 2) * dstNv12.pitchUV + x;
+        out[0] = static_cast<uint8_t>(min(255u, (u10 + 2u) >> 2));
+        out[1] = static_cast<uint8_t>(min(255u, (v10 + 2u) >> 2));
+    }
+}
+
+cudaError_t r800zzP010ToRgbHalfAndNv12(
+    const R800ZZGpuFrame& src, void* dstHalf,
+    const R800ZZGpuFrameMutable& dstNv12, cudaStream_t stream) {
+    dim3 block(16, 16);
+    dim3 grid((src.width + 15) / 16, (src.height + 15) / 16);
+    p010ToRgbHalfAndNv12Kernel<<<grid, block, 0, stream>>>(
+        src, static_cast<half*>(dstHalf), dstNv12);
+    return cudaGetLastError();
+}
+
+__global__ void p010ToNv12Kernel(R800ZZGpuFrame src, R800ZZGpuFrameMutable dst) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= src.width || y >= src.height) return;
+    const auto* yRow = reinterpret_cast<const uint16_t*>(src.y + static_cast<size_t>(y) * src.pitchY);
+    dst.y[static_cast<size_t>(y) * dst.pitchY + x] = static_cast<uint8_t>(min(255u, (static_cast<unsigned int>(yRow[x]) + 128u) >> 8));
+    if ((x & 1) == 0 && (y & 1) == 0) {
+        const auto* uvRow = reinterpret_cast<const uint16_t*>(src.uv + static_cast<size_t>(y / 2) * src.pitchUV);
+        auto* out = dst.uv + static_cast<size_t>(y / 2) * dst.pitchUV + x;
+        out[0] = static_cast<uint8_t>(min(255u, (static_cast<unsigned int>(uvRow[x]) + 128u) >> 8));
+        out[1] = static_cast<uint8_t>(min(255u, (static_cast<unsigned int>(uvRow[x + 1]) + 128u) >> 8));
+    }
+}
+
+cudaError_t r800zzP010ToNv12(
+    const R800ZZGpuFrame& src, const R800ZZGpuFrameMutable& dst,
+    cudaStream_t stream) {
+    dim3 block(16, 16);
+    dim3 grid((src.width + 15) / 16, (src.height + 15) / 16);
+    p010ToNv12Kernel<<<grid, block, 0, stream>>>(src, dst);
+    return cudaGetLastError();
+}
+
 cudaError_t r800zzBuildProjectionMap(void* mapFloat2, int width, int height,
                                       cudaStream_t stream) {
     dim3 block(16, 16);

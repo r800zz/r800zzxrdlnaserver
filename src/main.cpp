@@ -27,6 +27,7 @@
 #include "dlna_server.h"
 #include "webxr_https_server.h"
 #include "../resources/resource.h"
+#include "version.h"
 
 
 int ui_language = 0;
@@ -663,6 +664,29 @@ static std::filesystem::path MediaSelectionFilePath() {
     const std::filesystem::path settings = SettingsFilePath();
     if (settings.empty()) return {};
     return settings.parent_path() / L"media_selection.txt";
+}
+
+static std::filesystem::path VideoCodecSelectionFilePath(const wchar_t* filename) {
+    const auto settings = SettingsFilePath();
+    return settings.empty() ? std::filesystem::path{} : settings.parent_path() / filename;
+}
+static int LoadVideoCodecSelection(const wchar_t* filename, int defaultValue, int maxValue) {
+    std::ifstream stream(VideoCodecSelectionFilePath(filename), std::ios::binary);
+    int choice = defaultValue;
+    if (!(stream >> choice) || choice < 0 || choice > maxValue) return defaultValue;
+    return choice;
+}
+static void SaveVideoCodecSelection(const wchar_t* filename, int choice) {
+    const auto path = VideoCodecSelectionFilePath(filename);
+    if (path.empty()) return;
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) return;
+    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    if (stream) stream << choice << "\n";
+}
+static const wchar_t* Mp4VideoCodecArgument(int choice) {
+    return choice == 0 ? L"h264" : (choice == 2 ? L"av1" : L"hevc");
 }
 
 static std::filesystem::path AiBackendSelectionFilePath() {
@@ -1384,7 +1408,7 @@ struct ConversionProcess {
                const std::filesystem::path& outputFile,
                AiOutputMode mode,
                AiBackend selectedBackend,
-               int selectedDirectMlDevice) {
+               int selectedDirectMlDevice, int selectedCodec) {
         if (IsRunning()) return false;
         completed = false;
         lastExitCode = STILL_ACTIVE;
@@ -1438,6 +1462,11 @@ struct ConversionProcess {
             command += L" --qp 20 --start-ms 0 --output-mode " +
                        std::wstring(ConversionModeName(mode)) +
                        L" --no-preview";
+        }
+
+        if (mode != AiOutputMode::WebmVp9Alpha) {
+            command += L" --video-codec ";
+            command += Mp4VideoCodecArgument(selectedCodec);
         }
 
         std::vector<wchar_t> mutableCommand(command.begin(), command.end());
@@ -1529,7 +1558,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                    L"R800ZZDlnaServerWindow", nullptr};
     RegisterClassExW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName,
-                              L"r800zzXRdlnaServer 1.2",
+                              L"r800zzXRdlnaServer " VERSION ,
                               WS_OVERLAPPEDWINDOW, 100, 100, 820, 720,
                               nullptr, nullptr, wc.hInstance, nullptr);
 
@@ -1615,6 +1644,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
     DlnaServer server;
+    std::thread serverStopThread;
+    std::atomic<bool> serverStopFinished{false};
+    bool serverStopping = false;
     server.SetAiErrorCallback([hwnd](const AiErrorInfo& info) {
         // The AI Error UI is reserved for failures that stop AI passthrough.
         // Compatibility fallbacks and other recoverable diagnostics remain in
@@ -1641,6 +1673,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (!savedWebXrRoot.empty()) {
         webxrServer.SetRootDirectory(savedWebXrRoot);
     }
+    int conversion_video_codec = LoadVideoCodecSelection(L"conversion_video_codec.txt", 1, 2);
+    int realtime_video_codec = LoadVideoCodecSelection(L"realtime_video_codec.txt", 0, 1);
     VideoPlayerProcess videoPlayerProcess;
     ConversionProcess conversionProcess;
     int ai_backend = LoadAiBackendSelection(); // 0=NVIDIA CUDA, 1=DirectML, 2=CPU
@@ -1818,6 +1852,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             g_pSwapChain->ResizeBuffers(0, g_ResizeWidth, g_ResizeHeight, DXGI_FORMAT_UNKNOWN, 0);
             g_ResizeWidth = g_ResizeHeight = 0;
             CreateRenderTarget();
+        }
+
+        if (serverStopping && serverStopFinished.load(std::memory_order_acquire)) {
+            if (serverStopThread.joinable()) serverStopThread.join();
+            serverStopping = false;
         }
 
         ImGui_ImplDX11_NewFrame();
@@ -2066,7 +2105,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         // All four modes may be selected while the server is running. The
         // current RUN is left untouched; the selection is applied only at the
         // next file change or explicit zero seek.
-        if (server.IsRunning()) ImGui::BeginDisabled();
+        if ((server.IsRunning() || serverStopping)) ImGui::BeginDisabled();
         ImGui::RadioButton("Alpha packed", &ai_stream_mode, 0);
         ImGui::SameLine();
         ImGui::RadioButton("Alpha WebM VP9", &ai_stream_mode, 1);
@@ -2074,7 +2113,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         ImGui::RadioButton("Chroma Key", &ai_stream_mode, 2);
         ImGui::SameLine();
         ImGui::RadioButton("OFF", &ai_stream_mode, 3);
-        if (server.IsRunning()) ImGui::EndDisabled();
+        if ((server.IsRunning() || serverStopping)) ImGui::EndDisabled();
 
         if (ai_stream_mode != previousAiStreamMode) {
             g_selected_ai_mode.store(ai_stream_mode, std::memory_order_relaxed);
@@ -2082,13 +2121,28 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             g_aiErrorFatal = false;
             ai_stream_mode_has_saved_or_user_value = true;
             SaveAiStreamModeSelection(g_selected_ai_mode.load(std::memory_order_relaxed));
-            if (!server.IsRunning()) refreshAiPrewarm();
+            if (!(server.IsRunning() || serverStopping)) refreshAiPrewarm();
+        }
+
+        if ((server.IsRunning() || serverStopping)) ImGui::BeginDisabled();
+        const char* realtimeCodecLabels[] = {"H.265(HEVC)", "AV1"};
+        ImGui::SetNextItemWidth(120.0f);
+        ImGui::SameLine();
+        if (ImGui::Combo("Output codec", &realtime_video_codec,
+                         realtimeCodecLabels, 2)) {
+            SaveVideoCodecSelection(L"realtime_video_codec.txt", realtime_video_codec);
+        }
+        if ((server.IsRunning() || serverStopping)) ImGui::EndDisabled();
+        if (ai_stream_mode == 1) {
+            ImGui::TextDisabled("WebM output uses VP9 regardless of the codec selection");
         }
 
         if (ai_backend == 0) {
             if (aiPassthroughEnabled()) {
                 if (first_selected_video.empty()) {
                     ImGui::TextDisabled("RVM: No selected video; non-video files are served raw");
+                } else if (serverStopping) {
+                    ImGui::TextDisabled("RVM: Stopping");
                 } else if (server.IsRunning()) {
                     ImGui::TextDisabled("RVM: Ready");
                 } else {
@@ -2104,6 +2158,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             } else if (aiPassthroughEnabled()) {
                 if (first_selected_video.empty()) {
                     ImGui::TextDisabled("RVM: No selected video; non-video files are served raw");
+                } else if (serverStopping) {
+                    ImGui::TextDisabled("RVM: Stopping");
                 } else if (server.IsRunning()) {
                     ImGui::TextDisabled("RVM: Ready");
                 } else {
@@ -2115,7 +2171,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             }
         } else {
             if (aiPassthroughEnabled() && !first_selected_video.empty() &&
-                !server.IsRunning()) {
+                !(server.IsRunning() || serverStopping)) {
                 ImGui::TextDisabled(
                     "CPU backend: initializes when DLNA Server starts");
             } else {
@@ -2124,7 +2180,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         }
 
         ImGui::Spacing();
-        if (!server.IsRunning()) {
+        if (!(server.IsRunning() || serverStopping)) {
           const bool aiNeedsBackend =
             aiPassthroughEnabled() && !first_selected_video.empty();
           const bool backendReady = !aiNeedsBackend ||
@@ -2155,7 +2211,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                     selectedAiBackend(),
                     selectedDirectMlDevice(),
                     video_files_only,
-                    dlna_discovery_mode == 0);
+                    dlna_discovery_mode == 0,
+                    realtime_video_codec == 1 ? "av1" : "hevc");
             }
             ImGui::PopStyleColor(3);
             if (!can_start) ImGui::EndDisabled();
@@ -2166,14 +2223,23 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
            ImVec4(1.0f, 0.90f, 0.70f, 1.0f));
           ImGui::PushStyleColor( ImGuiCol_ButtonActive, ImVec4(1.0f, 0.84f, 0.58f, 1.0f));
 
-          if (ImGui::Button(uiText.stopServer, ImVec2(180, 0))) {
-            server.Stop();
+          if (serverStopping) ImGui::BeginDisabled();
+          if (ImGui::Button(serverStopping ? "Stopping..." : uiText.stopServer, ImVec2(180, 0))) {
+            if (!serverStopping) {
+                serverStopping = true;
+                serverStopFinished.store(false, std::memory_order_release);
+                serverStopThread = std::thread([&server, &serverStopFinished]() {
+                    server.Stop();
+                    serverStopFinished.store(true, std::memory_order_release);
+                });
+            }
           }
+          if (serverStopping) ImGui::EndDisabled();
           ImGui::PopStyleColor(3);
         }
 
         ImGui::SameLine();
-        if (server.IsRunning()) ImGui::BeginDisabled();
+        if ((server.IsRunning() || serverStopping)) ImGui::BeginDisabled();
         const bool dlnaModeChanged =
             ImGui::RadioButton("DLNA/Direct HTTP", &dlna_discovery_mode, 0);
         ImGui::SameLine();
@@ -2182,8 +2248,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (dlnaModeChanged || httpOnlyChanged) {
             SaveDlnaDiscoveryModeSelection(dlna_discovery_mode);
         }
-        if (server.IsRunning()) ImGui::EndDisabled();
-        ImGui::Text("%s: %s", uiText.status, server.Status().c_str());
+        if ((server.IsRunning() || serverStopping)) ImGui::EndDisabled();
+        ImGui::Text("%s: %s", uiText.status,
+                    serverStopping ? "Stopping..." : server.Status().c_str());
 
         if (g_aiErrorText.empty()) {
             ImGui::TextDisabled("AI Error: none");
@@ -2324,6 +2391,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (conversionRunning) ImGui::EndDisabled();
 
         if (conversionRunning) ImGui::BeginDisabled();
+        if (conversion_mode != 1) {
+            const char* codecLabels[] = {"H.264 (AVC)", "H.265(HEVC)", "AV1"};
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(120.0f);
+            if (ImGui::Combo("Output codec", &conversion_video_codec,
+                             codecLabels, 3)) {
+                SaveVideoCodecSelection(L"conversion_video_codec.txt", conversion_video_codec);
+            }
+        } else {
+            ImGui::TextDisabled("WebM output: VP9");
+        }
+        if (conversionRunning) ImGui::EndDisabled();
+
+        if (conversionRunning) ImGui::BeginDisabled();
         ImGui::SetNextItemWidth(260.0f);
         ImGui::Combo(uiText.conversionBackend, &conversion_backend,
                      backendItems, 3);
@@ -2399,7 +2480,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                     if (!conversionProcess.Start(
                             conversion_input, output, mode,
                             selectedConversionBackend(),
-                            selectedConversionDirectMlDevice()) &&
+                            selectedConversionDirectMlDevice(),
+                            conversion_video_codec) &&
                         resume_prewarm_after_conversion) {
                         refreshAiPrewarm();
                         resume_prewarm_after_conversion = false;
@@ -2519,6 +2601,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     videoPlayerProcess.Stop();
     conversionProcess.Stop(false);
     webxrServer.Stop();
+    if (serverStopThread.joinable()) serverStopThread.join();
     server.Stop();
     server.SetAiErrorCallback({});
     ImGui_ImplDX11_Shutdown();

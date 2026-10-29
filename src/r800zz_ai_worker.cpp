@@ -25,6 +25,7 @@ extern "C" {
 #include <libavutil/pixdesc.h>
 #include <libavutil/time.h>
 #include <libswresample/swresample.h>
+#include <libswscale/swscale.h>
 }
 
 #include <algorithm>
@@ -115,7 +116,8 @@ AVPixelFormat chooseCudaFormat(AVCodecContext*, const AVPixelFormat* formats) {
     for (const AVPixelFormat* p = formats; *p != AV_PIX_FMT_NONE; ++p) {
         if (*p == AV_PIX_FMT_CUDA) return *p;
     }
-    return AV_PIX_FMT_NONE;
+    // A decoder without CUDA output must still be allowed to return CPU frames.
+    return formats[0];
 }
 
 std::wstring utf8ToWide(const std::string& s) {
@@ -313,6 +315,8 @@ struct Args {
 
     std::filesystem::path input;
     std::filesystem::path model;
+    std::string videoCodec = "hevc";
+    bool videoCodecSpecified = false;
     int qp = 20;
     int device = 0;
     float downsample = 0.0f;
@@ -531,6 +535,14 @@ bool parseArgs(int argc, char** argv, Args& out) {
         };
         if (a == "--model") {
             const char* v = needValue("--model"); if (!v) return false; out.model = std::filesystem::u8path(v);
+        } else if (a == "--video-codec") {
+            const char* v = needValue("--video-codec"); if (!v) return false;
+            out.videoCodec = v;
+            out.videoCodecSpecified = true;
+            if (out.videoCodec != "h264" && out.videoCodec != "hevc" && out.videoCodec != "av1") {
+                std::cerr << "Unsupported video codec: " << out.videoCodec << "\n";
+                return false;
+            }
         } else if (a == "--qp") {
             const char* v = needValue("--qp"); if (!v) return false; out.qp = std::atoi(v);
         } else if (a == "--device") {
@@ -605,6 +617,10 @@ struct Pipeline {
     int videoIndex = -1;
     int audioIndex = -1;
     cudaStream_t cudaStream = nullptr;
+    SwsContext* decodeToNv12 = nullptr;
+    uint8_t* compatibleNv12 = nullptr;
+    size_t compatibleNv12Bytes = 0;
+    bool loggedDecodeConversion = false;
     void* rvmInput = nullptr;
     size_t rvmInputBytes = 0;
     void* projectionMap = nullptr;
@@ -694,6 +710,11 @@ struct Pipeline {
         if (inFmt) avformat_close_input(&inFmt);
         if (encFrames) av_buffer_unref(&encFrames);
         if (cudaDevice) av_buffer_unref(&cudaDevice);
+        if (decodeToNv12) sws_freeContext(decodeToNv12);
+        decodeToNv12 = nullptr;
+        if (compatibleNv12) cudaFree(compatibleNv12);
+        compatibleNv12 = nullptr;
+        compatibleNv12Bytes = 0;
         if (projectionMap) cudaFree(projectionMap);
         projectionMap = nullptr;
         if (webmU) cudaFree(webmU);
@@ -750,33 +771,55 @@ struct Pipeline {
 
         const char* cuvidName = nullptr;
         switch (inVideo->codecpar->codec_id) {
+        case AV_CODEC_ID_MPEG1VIDEO: cuvidName = "mpeg1_cuvid"; break;
+        case AV_CODEC_ID_MPEG2VIDEO: cuvidName = "mpeg2_cuvid"; break;
+        case AV_CODEC_ID_MPEG4: cuvidName = "mpeg4_cuvid"; break;
+        case AV_CODEC_ID_VC1: cuvidName = "vc1_cuvid"; break;
+        case AV_CODEC_ID_VP8: cuvidName = "vp8_cuvid"; break;
         case AV_CODEC_ID_VP9:  cuvidName = "vp9_cuvid"; break;
         case AV_CODEC_ID_H264: cuvidName = "h264_cuvid"; break;
         case AV_CODEC_ID_HEVC: cuvidName = "hevc_cuvid"; break;
-#ifdef AV_CODEC_ID_AV1
         case AV_CODEC_ID_AV1:  cuvidName = "av1_cuvid"; break;
-#endif
         default: break;
         }
         const AVCodec* decoder = cuvidName ? avcodec_find_decoder_by_name(cuvidName) : nullptr;
         bool explicitCuvid = decoder != nullptr;
         if (!decoder) decoder = avcodec_find_decoder(inVideo->codecpar->codec_id);
         if (!decoder) { error = "Video decoder not found"; return false; }
-        {
-            std::ostringstream d;
-            d << "decoder selected name=" << decoder->name
-              << " mode=" << (explicitCuvid ? "explicit-CUVID/NVDEC" : "generic-hwaccel-fallback");
-            logLine(d.str());
+        if (cuvidName && !explicitCuvid) {
+            logLine(std::string("CUDA decoder not present: ") + cuvidName +
+                "; using software decoder " + decoder->name);
         }
-        dec = avcodec_alloc_context3(decoder);
-        if (!dec) { error = "avcodec_alloc_context3 decoder failed"; return false; }
-        rc = avcodec_parameters_to_context(dec, inVideo->codecpar);
-        if (rc < 0) { error = "avcodec_parameters_to_context: " + fferr(rc); return false; }
-        dec->hw_device_ctx = av_buffer_ref(cudaDevice);
-        dec->get_format = chooseCudaFormat;
-        dec->pkt_timebase = inVideo->time_base;
-        rc = avcodec_open2(dec, decoder, nullptr);
+        auto openDecoder = [&](const AVCodec* selected, bool hardware) -> int {
+            if (dec) avcodec_free_context(&dec);
+            dec = avcodec_alloc_context3(selected);
+            if (!dec) return AVERROR(ENOMEM);
+            int result = avcodec_parameters_to_context(dec, inVideo->codecpar);
+            if (result < 0) return result;
+            if (hardware) {
+                dec->hw_device_ctx = av_buffer_ref(cudaDevice);
+                if (!dec->hw_device_ctx) return AVERROR(ENOMEM);
+                dec->get_format = chooseCudaFormat;
+            }
+            dec->pkt_timebase = inVideo->time_base;
+            return avcodec_open2(dec, selected, nullptr);
+        };
+        rc = openDecoder(decoder, explicitCuvid);
+        if (rc < 0 && explicitCuvid) {
+            logLine(std::string("CUDA decoder initialization failed: ") +
+                decoder->name + " (" + fferr(rc) + "); trying software decoder");
+            const AVCodec* softwareDecoder = avcodec_find_decoder(inVideo->codecpar->codec_id);
+            if (!softwareDecoder) {
+                error = "No software decoder for CUDA fallback";
+                return false;
+            }
+            decoder = softwareDecoder;
+            explicitCuvid = false;
+            rc = openDecoder(decoder, false);
+        }
         if (rc < 0) { error = "avcodec_open2 decoder: " + fferr(rc); return false; }
+        logLine(std::string("decoder selected name=") + decoder->name +
+            " mode=" + (explicitCuvid ? "explicit-CUVID/NVDEC" : "software-decoder-CUDA-upload"));
         return true;
     }
 
@@ -1046,7 +1089,9 @@ struct Pipeline {
     bool initEncoderAndMuxer(std::string& error) {
         const bool webmAlphaOutput =
             args.outputMode == Args::OutputMode::WebmVp9Alpha;
-        const char* muxerName = webmAlphaOutput
+        const bool liveAv1Webm = !args.offlineConvert && !webmAlphaOutput &&
+            args.videoCodec == "av1";
+        const char* muxerName = (webmAlphaOutput || liveAv1Webm)
             ? "webm" : (args.offlineConvert ? "mp4" : "mpegts");
         // The MP4 muxer's +faststart trailer pass reopens AVFormatContext::url
         // to move the moov atom ahead of mdat. Passing only the path to
@@ -1067,13 +1112,12 @@ struct Pipeline {
             outFmt->max_interleave_delta = 100000; // 100 ms, in AV_TIME_BASE units.
         }
 
-        const AVCodec* encoder = webmAlphaOutput
-            ? avcodec_find_encoder_by_name("libvpx-vp9")
-            : avcodec_find_encoder_by_name("hevc_nvenc");
+        const char* encoderName = webmAlphaOutput ? "libvpx-vp9" :
+            (args.videoCodec == "h264" ? "h264_nvenc" :
+             args.videoCodec == "av1" ? "av1_nvenc" : "hevc_nvenc");
+        const AVCodec* encoder = avcodec_find_encoder_by_name(encoderName);
         if (!encoder) {
-            error = webmAlphaOutput
-                ? "libvpx-vp9 encoder not found in linked FFmpeg"
-                : "hevc_nvenc encoder not found in linked FFmpeg";
+            error = std::string("Selected video encoder unavailable: ") + encoderName;
             return false;
         }
         enc = avcodec_alloc_context3(encoder);
@@ -1135,12 +1179,13 @@ struct Pipeline {
         if (rc < 0) { error = "avcodec_parameters_from_context: " + fferr(rc); return false; }
         outVideo->time_base = enc->time_base;
         outVideo->codecpar->codec_tag = 0;
-        if (args.offlineConvert && !webmAlphaOutput) {
+        if (args.offlineConvert && !webmAlphaOutput &&
+            enc->codec_id == AV_CODEC_ID_HEVC) {
             outVideo->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
         }
         if (webmAlphaOutput) av_dict_set(&outVideo->metadata, "alpha_mode", "1", 0);
 
-        if (webmAlphaOutput && inAudio) {
+        if ((webmAlphaOutput || liveAv1Webm) && inAudio) {
             if (!initAudioTranscode(AV_CODEC_ID_OPUS, "libopus",
                                     AV_SAMPLE_FMT_FLT, error)) return false;
         } else if (inAudio && isTsAudioCopySupported(inAudio->codecpar->codec_id)) {
@@ -1187,7 +1232,7 @@ struct Pipeline {
         }
 
         AVDictionary* muxOpts = nullptr;
-        if (webmAlphaOutput && !args.offlineConvert) {
+        if ((webmAlphaOutput || liveAv1Webm) && !args.offlineConvert) {
             av_dict_set(&muxOpts, "live", "1", 0);
             av_dict_set(&muxOpts, "cluster_time_limit", "100", 0);
             av_dict_set(&muxOpts, "cluster_size_limit", "1048576", 0);
@@ -1300,30 +1345,172 @@ struct Pipeline {
             logLine(t.str());
         }
 
-        if (frame->format != AV_PIX_FMT_CUDA || !frame->hw_frames_ctx) {
-            error = "Decoder did not return AV_PIX_FMT_CUDA frame";
-            return false;
-        }
-        const auto* hwfc = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
-        if (hwfc->sw_format != AV_PIX_FMT_NV12) {
-            const char* n = av_get_pix_fmt_name(hwfc->sw_format);
-            error = std::string("Only CUDA NV12 decode surfaces are supported in the first realtime build; got ") + (n ? n : "unknown");
-            return false;
-        }
-
+        const bool cudaDecoded = frame->format == AV_PIX_FMT_CUDA && frame->hw_frames_ctx;
+        const auto* hwfc = cudaDecoded
+            ? reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data)
+            : nullptr;
         R800ZZGpuFrame src{};
-        src.y = frame->data[0];
-        src.uv = frame->data[1];
-        src.pitchY = frame->linesize[0];
-        src.pitchUV = frame->linesize[1];
         src.width = width;
         src.height = height;
+        bool rvmInputReady = false;
+        if (cudaDecoded && hwfc->sw_format == AV_PIX_FMT_NV12) {
+            src.y = frame->data[0];
+            src.uv = frame->data[1];
+            src.pitchY = frame->linesize[0];
+            src.pitchUV = frame->linesize[1];
+        } else if (cudaDecoded && hwfc->sw_format == AV_PIX_FMT_P010LE && (width % 2) == 0 && (height % 2) == 0) {
+            // Prefer a GPU-only conversion over downloading the decoded surface.
+            const size_t lumaBytes = static_cast<size_t>(width) * height;
+            const size_t bytesNeeded = lumaBytes + lumaBytes / 2;
+            if (compatibleNv12Bytes < bytesNeeded) {
+                if (compatibleNv12) cudaFree(compatibleNv12);
+                compatibleNv12 = nullptr;
+                compatibleNv12Bytes = 0;
+                const cudaError_t rc = cudaMalloc(reinterpret_cast<void**>(&compatibleNv12), bytesNeeded);
+                if (rc != cudaSuccess) {
+                    error = std::string("Allocate GPU P010 compatibility surface: ") + cudaGetErrorString(rc);
+                    return false;
+                }
+                compatibleNv12Bytes = bytesNeeded;
+            }
+            R800ZZGpuFrame p010{};
+            p010.y = frame->data[0];
+            p010.uv = frame->data[1];
+            p010.pitchY = frame->linesize[0];
+            p010.pitchUV = frame->linesize[1];
+            p010.width = width;
+            p010.height = height;
+            R800ZZGpuFrameMutable nv12{};
+            nv12.y = compatibleNv12;
+            nv12.uv = compatibleNv12 + lumaBytes;
+            nv12.pitchY = width;
+            nv12.pitchUV = width;
+            nv12.width = width;
+            nv12.height = height;
+            // Feed the original P010 precision directly to the RVM FP16 tensor.
+            // The NV12 output staging is generated in the same CUDA pass for
+            // the current NV12-only compositor, not used as the RVM input.
+            const cudaError_t rc = r800zzP010ToRgbHalfAndNv12(
+                p010, rvmInput, nv12, cudaStream);
+            if (rc != cudaSuccess) {
+                error = std::string("GPU P010->RVM conversion failed: ") + cudaGetErrorString(rc);
+                return false;
+            }
+            rvmInputReady = true;
+            src.y = nv12.y;
+            src.uv = nv12.uv;
+            src.pitchY = nv12.pitchY;
+            src.pitchUV = nv12.pitchUV;
+            if (!loggedDecodeConversion) {
+                logLine("P010 direct GPU FP16 RVM input; NV12 output staging fused for existing 8-bit composite");
+                loggedDecodeConversion = true;
+            }
+        } else {
+            // Convert any software-downloadable decoded format through swscale.
+            // The existing CUDA RVM/composite/encoder pipeline still consumes NV12.
+            std::unique_ptr<AVFrame, AvFrameCloser> downloaded(av_frame_alloc());
+            std::unique_ptr<AVFrame, AvFrameCloser> normalized(av_frame_alloc());
+            if (!downloaded || !normalized) {
+                error = "Allocate decoder compatibility frames failed";
+                return false;
+            }
+            const AVFrame* conversionSource = frame;
+            int transferRc = 0;
+            if (cudaDecoded) {
+                transferRc = av_hwframe_transfer_data(downloaded.get(), frame, 0);
+                if (transferRc < 0) {
+                    error = "Download CUDA decoded frame for pixel format conversion: " + fferr(transferRc);
+                    return false;
+                }
+                conversionSource = downloaded.get();
+            }
+            if ((width & 1) || (height & 1)) {
+                error = "NV12 compatibility output requires even dimensions; odd-size padding remains unsupported in CUDA path";
+                return false;
+            }
+            normalized->format = AV_PIX_FMT_NV12;
+            normalized->width = width;
+            normalized->height = height;
+            transferRc = av_frame_get_buffer(normalized.get(), 32);
+            if (transferRc < 0) {
+                error = "Allocate NV12 compatibility frame: " + fferr(transferRc);
+                return false;
+            }
+            decodeToNv12 = sws_getCachedContext(
+                decodeToNv12, conversionSource->width, conversionSource->height,
+                static_cast<AVPixelFormat>(conversionSource->format),
+                width, height, AV_PIX_FMT_NV12,
+                SWS_BILINEAR, nullptr, nullptr, nullptr);
+            if (!decodeToNv12) {
+                const char* name = av_get_pix_fmt_name(static_cast<AVPixelFormat>(conversionSource->format));
+                error = std::string("Convert decoded pixel format to NV12 unavailable: ") +
+                    (name ? name : "unknown");
+                return false;
+            }
+            const int convertedRows = sws_scale(
+                decodeToNv12, conversionSource->data, conversionSource->linesize,
+                0, conversionSource->height, normalized->data, normalized->linesize);
+            if (convertedRows != height) {
+                error = "Convert decoded frame to NV12 failed; rows=" + std::to_string(convertedRows);
+                return false;
+            }
+            const size_t lumaBytes = static_cast<size_t>(width) * height;
+            const size_t bytesNeeded = lumaBytes + lumaBytes / 2;
+            if (compatibleNv12Bytes < bytesNeeded) {
+                if (compatibleNv12) cudaFree(compatibleNv12);
+                compatibleNv12 = nullptr;
+                compatibleNv12Bytes = 0;
+                const cudaError_t allocRc = cudaMalloc(reinterpret_cast<void**>(&compatibleNv12), bytesNeeded);
+                if (allocRc != cudaSuccess) {
+                    error = std::string("Allocate CUDA NV12 compatibility surface: ") + cudaGetErrorString(allocRc);
+                    return false;
+                }
+                compatibleNv12Bytes = bytesNeeded;
+            }
+            cudaError_t copyRc = cudaMemcpy2DAsync(
+                compatibleNv12, width, normalized->data[0], normalized->linesize[0],
+                width, height, cudaMemcpyHostToDevice, cudaStream);
+            if (copyRc == cudaSuccess) {
+                copyRc = cudaMemcpy2DAsync(
+                    compatibleNv12 + lumaBytes, width,
+                    normalized->data[1], normalized->linesize[1],
+                    width, height / 2, cudaMemcpyHostToDevice, cudaStream);
+            }
+            if (copyRc != cudaSuccess) {
+                error = std::string("Upload normalized NV12 CUDA surface: ") + cudaGetErrorString(copyRc);
+                return false;
+            }
+            // The upload must complete before temporary CPU frames are freed.
+            copyRc = cudaStreamSynchronize(cudaStream);
+            if (copyRc != cudaSuccess) {
+                error = std::string("Synchronize normalized NV12 CUDA upload: ") + cudaGetErrorString(copyRc);
+                return false;
+            }
+            src.y = compatibleNv12;
+            src.uv = compatibleNv12 + lumaBytes;
+            src.pitchY = width;
+            src.pitchUV = width;
+            if (!loggedDecodeConversion) {
+                const char* name = av_get_pix_fmt_name(static_cast<AVPixelFormat>(conversionSource->format));
+                logLine(std::string("Decoder compatibility path active: ") +
+                    (name ? name : "unknown") +
+                    (cudaDecoded ? " -> CPU swscale NV12 -> CUDA (slower)"
+                                 : " CPU decoder -> NV12 -> CUDA upload (slower)"));
+                loggedDecodeConversion = true;
+            }
+        }
 
         auto t0 = std::chrono::steady_clock::now();
-        if (trace) logLine("first-frame stage=nv12_to_fp16_start");
-        cudaError_t ce = r800zzNv12ToRgbHalfNchw(src, rvmInput, cudaStream);
-        if (ce != cudaSuccess) { error = std::string("NV12->RVM kernel: ") + cudaGetErrorString(ce); return false; }
-        if (trace) logLine("first-frame stage=nv12_to_fp16_enqueued");
+        if (trace) logLine("first-frame stage=rgb_fp16_prepare_start");
+        cudaError_t ce = cudaSuccess;
+        if (!rvmInputReady) {
+            ce = r800zzNv12ToRgbHalfNchw(src, rvmInput, cudaStream);
+            if (ce != cudaSuccess) {
+                error = std::string("NV12->RVM kernel: ") + cudaGetErrorString(ce);
+                return false;
+            }
+        }
+        if (trace) logLine("first-frame stage=rgb_fp16_prepare_enqueued");
         // RVM uses the same CUDA stream, so the conversion kernel can feed it
         // without a CPU-side synchronization.
         RvmGpuOutput rvmOut{};
@@ -2056,6 +2243,7 @@ int main(int argc, char** argv) {
         cpuOptions.input = args.input;
         cpuOptions.output = args.outputFile;
         cpuOptions.model = args.model;
+        cpuOptions.videoCodec = args.videoCodecSpecified ? args.videoCodec : "h264";
         cpuOptions.quality = args.qp;
         cpuOptions.downsample = args.downsample > 0.0f
             ? args.downsample : 0.25f;
@@ -2439,9 +2627,16 @@ int main(int argc, char** argv) {
             std::string outputMode;
             std::string pipeName;
             std::string inputHex;
+            std::string requestedCodec = "hevc";
             parser >> verb >> requestId >> requestedMs >>
                 backendText >> requestedDevice >>
                 outputMode >> pipeName >> inputHex;
+            if (parser >> requestedCodec) {
+                if (requestedCodec != "hevc" && requestedCodec != "av1") {
+                    logLine("RESIDENT_ERROR invalid video codec=" + requestedCodec);
+                    continue;
+                }
+            }
 
             ResidentBackend requestedBackend = ResidentBackend::None;
             if (verb != "RUN" ||
@@ -2498,7 +2693,7 @@ int main(int argc, char** argv) {
                 std::lock_guard<std::mutex> lock(streamMutex);
                 streamBusy = true;
                 pendingStreamJob = [&, startMs, outputMode, pipeName,
-                                    streamInput, requestId, requestedBackend]() {
+                                    streamInput, requestId, requestedBackend, requestedCodec]() {
                     HANDLE output = openOutputPipe(pipeName);
                     if (output == INVALID_HANDLE_VALUE) return;
 
@@ -2513,6 +2708,8 @@ int main(int argc, char** argv) {
                         p.args.resident = false;
                         p.args.previewOnly = false;
                         p.args.offlineConvert = false;
+                        p.args.videoCodec = requestedCodec;
+                        p.args.videoCodecSpecified = true;
                         p.args.startMs = startMs;
                         if (outputMode == "webm-alpha") {
                             p.args.outputMode =
@@ -2554,7 +2751,7 @@ int main(int argc, char** argv) {
                     } else {
                         streamCode = R800zzRunDmlResidentStream(
                             residentDmlSession, streamInput,
-                            startMs, outputMode, output,
+                            startMs, outputMode, requestedCodec, output,
                             &cancelStream, runError);
                     }
 

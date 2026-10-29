@@ -14,6 +14,7 @@ struct CpuConversionOptions {
     std::filesystem::path output;
     std::filesystem::path model;
     CpuConversionMode mode{CpuConversionMode::AlphaPacked};
+    std::string videoCodec{"h264"};
     int quality{20};
     float downsample{0.25f};
 };

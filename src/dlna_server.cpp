@@ -1317,6 +1317,7 @@ bool LaunchAiProcess(const std::filesystem::path& worker,
                      AiBackend backend,
                      int device,
                      AiOutputMode output_mode,
+                     const std::string& video_codec,
                      AiProcess& result) {
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
@@ -1356,6 +1357,9 @@ bool LaunchAiProcess(const std::filesystem::path& worker,
         std::to_wstring(device) + L" --qp 20 --start-ms " +
         std::to_wstring(start_ms) + L" --output-mode " +
         Utf8ToWide(AiOutputModeArgument(output_mode)) + L" --no-preview";
+    if (output_mode != AiOutputMode::WebmVp9Alpha) {
+        command += L" --video-codec " + Utf8ToWide(video_codec);
+    }
     if (backend == AiBackend::DirectML) command += L" --backend dml";
     else if (backend == AiBackend::Cpu) command += L" --backend cpu";
 
@@ -2069,7 +2073,8 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
                        AiBackend ai_backend,
                        int directml_device,
                        bool video_files_only,
-                       bool enable_ssdp) {
+                       bool enable_ssdp,
+                       const std::string& realtime_video_codec) {
     Stop();
 
     if (media_files.empty()) {
@@ -2082,6 +2087,7 @@ bool DlnaServer::Start(const std::vector<std::filesystem::path>& media_files,
         return false;
     }
 
+    realtime_video_codec_ = realtime_video_codec;
     media_items_.clear();
     directory_items_.clear();
     std::error_code ec;
@@ -2370,16 +2376,15 @@ void DlnaServer::Stop() {
         });
     }
 
-    if (was_running) {
-        SetStatus("Stopped");
-        AddLog("DLNA server stopped.");
-    }
-
     // The AI worker belongs to the running DLNA server.  Do not leave a
     // prepared/failed GPU state alive after Stop(); the next Start() must retry
     // initialization from a clean state.
     StopResidentAiWorker();
     active_ai_media_id_ = 0;
+    if (was_running) {
+        SetStatus("Stopped");
+        AddLog("DLNA server stopped.");
+    }
 }
 
 std::string DlnaServer::AdvertisedIp() const {
@@ -3335,7 +3340,8 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
     requestOutputMode = DecodeAiOutputMode(active_ai_mode_.load(std::memory_order_relaxed));
 
     const auto requestMimeType = [&]() -> const char* {
-        return requestOutputMode == AiOutputMode::WebmVp9Alpha
+        return (requestOutputMode == AiOutputMode::WebmVp9Alpha ||
+                realtime_video_codec_ == "av1")
             ? "video/webm" : "video/mp2t";
     };
     const auto requestOutputLabel = [&]() {
@@ -3345,7 +3351,8 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
         if (requestOutputMode == AiOutputMode::ChromaKeyHevc) {
             return std::string("Chroma Key: Green background HEVC/NVENC");
         }
-        return std::string("Alpha: AlphaPacked HEVC/NVENC");
+        return std::string("Alpha: AlphaPacked ") +
+            (realtime_video_codec_ == "av1" ? "AV1" : "HEVC");
     };
 
     // Generic DLNA/HTTP clients may use the experimental virtual byte range.
@@ -3355,9 +3362,11 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
     // Preserve the existing experimental byte ranges for MPEG-TS only.
     const bool virtual_range_enabled =
         !g_r800zz_vrplayer_request &&
-        requestOutputMode != AiOutputMode::WebmVp9Alpha;
+        requestOutputMode != AiOutputMode::WebmVp9Alpha &&
+        realtime_video_codec_ != "av1";
     const bool fixed_muxrate_ts =
-        requestOutputMode != AiOutputMode::WebmVp9Alpha;
+        requestOutputMode != AiOutputMode::WebmVp9Alpha &&
+        realtime_video_codec_ != "av1";
     const uint64_t virtual_total_bytes = virtual_range_enabled
         ? (fixed_muxrate_ts
             ? RealtimeTsVirtualSizeBytes(item.duration_ms)
@@ -3745,7 +3754,8 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
                 AiBackendArgument(ai_backend_) + " " +
                 std::to_string(residentDevice) + " " +
                 AiOutputModeArgument(requestOutputMode) + " " + pipeName + " " +
-                HexEncode(WideToUtf8(item.path.wstring())) + "\n";
+                HexEncode(WideToUtf8(item.path.wstring())) + " " +
+                realtime_video_codec_ + "\n";
             bool commandOk = false;
             {
                 std::lock_guard<std::mutex> controlLock(resident->control_mutex);
@@ -4100,7 +4110,7 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
     const bool launched = LaunchAiProcess(
         worker, item.path, model, requested_start_ms,
         ai_backend_, cudaBackend ? 0 : directml_device_,
-        requestOutputMode, process);
+        requestOutputMode, realtime_video_codec_, process);
     if (!launched) {
         const std::string message =
             "AI Passthrough could not start worker. Win32=" +
@@ -4474,7 +4484,8 @@ std::string DlnaServer::MimeType(const MediaItem& item) const {
     if ((active_ai_mode_.load(std::memory_order_relaxed) != 3) && item.is_video) {
         AiOutputMode selectedMode;
         selectedMode = DecodeAiOutputMode(active_ai_mode_.load(std::memory_order_relaxed));
-        return selectedMode == AiOutputMode::WebmVp9Alpha
+        return (selectedMode == AiOutputMode::WebmVp9Alpha ||
+                realtime_video_codec_ == "av1")
             ? "video/webm" : "video/mp2t";
     }
     const std::string ext = ToLower(item.path.extension().string());
@@ -4513,7 +4524,7 @@ std::string DlnaServer::DlnaContentFeatures() const {
         }
         // Live WebM supports time seek but has no valid byte-range mapping.
         if (DecodeAiOutputMode(active_ai_mode_.load(std::memory_order_relaxed)) ==
-            AiOutputMode::WebmVp9Alpha) {
+            AiOutputMode::WebmVp9Alpha || realtime_video_codec_ == "av1") {
             return "DLNA.ORG_OP=10;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000";
         }
         return "DLNA.ORG_OP=11;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000";
@@ -4532,8 +4543,8 @@ std::string DlnaServer::DlnaProtocolInfo(const MediaItem* item) const {
         selectedMode = DecodeAiOutputMode(active_ai_mode_.load(std::memory_order_relaxed));
         const std::string mime = item
             ? MimeType(*item)
-            : (selectedMode == AiOutputMode::WebmVp9Alpha
-                ? "video/webm" : "video/mp2t");
+            : (selectedMode == AiOutputMode::WebmVp9Alpha ||
+                realtime_video_codec_ == "av1" ? "video/webm" : "video/mp2t");
         return "http-get:*:" + mime + ":" + DlnaContentFeatures();
     }
 
@@ -4784,13 +4795,15 @@ std::string DlnaServer::BrowseSoapResponse(const std::string& object_id,
         AiOutputMode selectedMode;
         selectedMode = DecodeAiOutputMode(active_ai_mode_.load(std::memory_order_relaxed));
         if ((active_ai_mode_.load(std::memory_order_relaxed) != 3) && item.is_video &&
-            selectedMode != AiOutputMode::WebmVp9Alpha) {
+            selectedMode != AiOutputMode::WebmVp9Alpha &&
+            realtime_video_codec_ != "av1") {
             advertisedSize = RealtimeTsVirtualSizeBytes(item.duration_ms);
         }
         // Source byte length must not masquerade as encoded WebM byte length.
         const bool liveWebm =
             active_ai_mode_.load(std::memory_order_relaxed) != 3 &&
-            item.is_video && selectedMode == AiOutputMode::WebmVp9Alpha;
+            item.is_video && (selectedMode == AiOutputMode::WebmVp9Alpha ||
+            realtime_video_codec_ == "av1");
         if (!liveWebm && advertisedSize > 0 &&
             (!(active_ai_mode_.load(std::memory_order_relaxed) != 3) ||
              !item.is_video || !g_r800zz_vrplayer_request)) {

@@ -126,6 +126,8 @@ private:
     int audioIndex_ = -1;
     int width_ = 0;
     int height_ = 0;
+    int sourceWidth_ = 0;
+    int sourceHeight_ = 0;
     AVRational frameRate_{30, 1};
     bool audioCopy_ = false;
     int64_t audioNextPts_ = AV_NOPTS_VALUE;
@@ -189,9 +191,18 @@ private:
         inputVideo_ = inputFormat_->streams[videoIndex_];
         width_ = inputVideo_->codecpar->width;
         height_ = inputVideo_->codecpar->height;
-        if (width_ <= 0 || height_ <= 0 || (width_ & 1) || (height_ & 1)) {
-            error = "CPU conversion requires positive even video dimensions";
+        if (width_ <= 0 || height_ <= 0) {
+            error = "CPU conversion requires positive video dimensions";
             return false;
+        }
+        sourceWidth_ = width_;
+        sourceHeight_ = height_;
+        width_ += width_ & 1;
+        height_ += height_ & 1;
+        if (sourceWidth_ != width_ || sourceHeight_ != height_) {
+            logCpu("Padding odd dimensions " + std::to_string(sourceWidth_) + "x" +
+                   std::to_string(sourceHeight_) + " to " +
+                   std::to_string(width_) + "x" + std::to_string(height_));
         }
         frameRate_ = av_guess_frame_rate(inputFormat_, inputVideo_, nullptr);
         if (frameRate_.num <= 0 || frameRate_.den <= 0) {
@@ -236,13 +247,30 @@ private:
     }
 
     const AVCodec* selectRegularVideoEncoder() {
-        const char* names[] = {"libx264", "libopenh264"};
-        for (const char* name : names) {
-            if (const AVCodec* codec = avcodec_find_encoder_by_name(name)) {
+        const std::string& requested = options_.videoCodec;
+        const char* h264[] = {"libx264", "libopenh264"};
+        const char* hevc[] = {"libx265"};
+        const char* av1[] = {"libsvtav1", "libaom-av1"};
+        const char* const* candidates = nullptr;
+        size_t count = 0;
+        if (requested == "h264") {
+            candidates = h264;
+            count = sizeof(h264) / sizeof(h264[0]);
+        } else if (requested == "hevc") {
+            candidates = hevc;
+            count = sizeof(hevc) / sizeof(hevc[0]);
+        } else if (requested == "av1") {
+            candidates = av1;
+            count = sizeof(av1) / sizeof(av1[0]);
+        } else {
+            return nullptr;
+        }
+        for (size_t i = 0; i < count; ++i) {
+            if (const AVCodec* codec = avcodec_find_encoder_by_name(candidates[i])) {
                 return codec;
             }
         }
-        return avcodec_find_encoder(AV_CODEC_ID_MPEG4);
+        return nullptr;
     }
 
     bool initOutput(std::string& error) {
@@ -301,6 +329,13 @@ private:
                 av_dict_set(&encoderOptions, "preset", "medium", 0);
                 av_dict_set(&encoderOptions, "crf",
                             std::to_string(std::clamp(options_.quality, 0, 51)).c_str(), 0);
+            }
+        } else if (encoder->id == AV_CODEC_ID_HEVC || encoder->id == AV_CODEC_ID_AV1) {
+            videoEncoder_->bit_rate = 0;
+            av_dict_set(&encoderOptions, "crf",
+                        std::to_string(std::clamp(options_.quality, 0, 51)).c_str(), 0);
+            if (encoder->id == AV_CODEC_ID_HEVC) {
+                av_dict_set(&encoderOptions, "preset", "medium", 0);
             }
         } else {
             videoEncoder_->flags |= AV_CODEC_FLAG_QSCALE;
@@ -521,7 +556,7 @@ private:
         toRgb_ = sws_getCachedContext(
             toRgb_, frame->width, frame->height,
             static_cast<AVPixelFormat>(frame->format),
-            width_, height_, AV_PIX_FMT_RGB24,
+            sourceWidth_, sourceHeight_, AV_PIX_FMT_RGB24,
             SWS_BILINEAR, nullptr, nullptr, nullptr);
         if (!toRgb_) {
             error = "sws_getCachedContext decode->RGB failed";
@@ -532,11 +567,23 @@ private:
         const int scaled = sws_scale(
             toRgb_, frame->data, frame->linesize, 0, frame->height,
             rgbData, rgbLinesize);
-        if (scaled != height_) {
+        if (scaled != sourceHeight_) {
             error = "sws_scale decode->RGB returned " + std::to_string(scaled);
             return false;
         }
 
+        if (sourceWidth_ != width_) {
+            for (int y = 0; y < sourceHeight_; ++y) {
+                uint8_t* row = sourceRgb_.data() + static_cast<size_t>(y) * width_ * 3;
+                std::memcpy(row + static_cast<size_t>(sourceWidth_) * 3,
+                            row + static_cast<size_t>(sourceWidth_ - 1) * 3, 3);
+            }
+        }
+        if (sourceHeight_ != height_) {
+            std::memcpy(sourceRgb_.data() + static_cast<size_t>(sourceHeight_) * width_ * 3,
+                        sourceRgb_.data() + static_cast<size_t>(sourceHeight_ - 1) * width_ * 3,
+                        static_cast<size_t>(width_) * 3);
+        }
         const size_t pixels = static_cast<size_t>(width_) *
                               static_cast<size_t>(height_);
         for (size_t i = 0; i < pixels; ++i) {
