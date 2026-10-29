@@ -1,5 +1,5 @@
 #define MyAppName "r800zzXRdlnaServer"
-#define MyAppVersion "1.2"
+#define MyAppVersion "1.3"
 #define MyAppPublisher "R800ZZ"
 #define MyAppURL "https://vr180g.com/"
 #define MyAppExeName "r800zz_dlna_server.exe"
@@ -46,7 +46,7 @@ RestartApplications=no
 SetupLogging=yes
 
 ; Windows version metadata for the installer EXE.
-VersionInfoVersion=1.2.0.0
+VersionInfoVersion=1.3.0.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} installer
 VersionInfoProductName={#MyAppName}
