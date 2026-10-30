@@ -2128,7 +2128,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         const char* realtimeCodecLabels[] = {"H.265(HEVC)", "AV1"};
         ImGui::SetNextItemWidth(120.0f);
         ImGui::SameLine();
-        if (ImGui::Combo("Output codec", &realtime_video_codec,
+        if (ImGui::Combo("Output codec##realtime_output_codec", &realtime_video_codec,
                          realtimeCodecLabels, 2)) {
             SaveVideoCodecSelection(L"realtime_video_codec.txt", realtime_video_codec);
         }
@@ -2395,7 +2395,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             const char* codecLabels[] = {"H.264 (AVC)", "H.265(HEVC)", "AV1"};
             ImGui::SameLine();
             ImGui::SetNextItemWidth(120.0f);
-            if (ImGui::Combo("Output codec", &conversion_video_codec,
+            if (ImGui::Combo("Output codec##conversion_output_codec", &conversion_video_codec,
                              codecLabels, 3)) {
                 SaveVideoCodecSelection(L"conversion_video_codec.txt", conversion_video_codec);
             }
