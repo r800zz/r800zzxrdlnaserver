@@ -2,7 +2,7 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
-### Ver 1.3 : 이전에 지원하지 않았던 동영상 형식에 대한 지원을 추가했습니다. (r800zzvrplayer 1.5 필요)
+### Ver 1.3.1 : 이전에 지원하지 않았던 동영상 형식에 대한 지원을 추가했습니다. (r800zzvrplayer 1.5 필요)
 ### Ver 1.2 : "Direct HTTP only" 기능 추가.
 DLNA를 사용하면 홈 네트워크의 스마트 TV와 같은 장치에서 파일에 접근할 수 있습니다.  
 Direct HTTP를 사용하면 가족과 파일을 공유하지 않고도 PC의 파일을 탐색할 수 있습니다.
