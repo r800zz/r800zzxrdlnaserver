@@ -2954,17 +2954,20 @@ int RunR800zzDmlBackend(int argc, char** argv) {
     wideArgs.reserve(static_cast<size_t>(argc));
     for (int i = 0; i < argc; ++i) {
         const char* src = argv[i] ? argv[i] : "";
-        UINT codePage = CP_UTF8;
-        DWORD flags = MB_ERR_INVALID_CHARS;
-        int count = MultiByteToWideChar(codePage, flags, src, -1, nullptr, 0);
+        constexpr UINT codePage = CP_UTF8;
+        constexpr DWORD flags = MB_ERR_INVALID_CHARS;
+        const int count = MultiByteToWideChar(
+            codePage, flags, src, -1, nullptr, 0);
         if (count <= 0) {
-            codePage = CP_ACP;
-            flags = 0;
-            count = MultiByteToWideChar(codePage, flags, src, -1, nullptr, 0);
+            std::cerr << "ERROR: invalid UTF-8 argument at index " << i
+                      << ", Win32=" << GetLastError() << '\n';
+            return 2;
         }
-        if (count <= 0) return 2;
         std::wstring value(static_cast<size_t>(count), L'\0');
-        if (MultiByteToWideChar(codePage, flags, src, -1, value.data(), count) <= 0) {
+        if (MultiByteToWideChar(
+                codePage, flags, src, -1, value.data(), count) != count) {
+            std::cerr << "ERROR: UTF-8 to UTF-16 conversion failed at index "
+                      << i << ", Win32=" << GetLastError() << '\n';
             return 2;
         }
         if (!value.empty() && value.back() == L'\0') value.pop_back();

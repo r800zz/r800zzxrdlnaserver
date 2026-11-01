@@ -2152,7 +2152,7 @@ struct Pipeline {
 
 } // namespace
 
-int main(int argc, char** argv) {
+static int workerMain(int argc, char** argv) {
     // One worker executable for every backend. CUDA keeps its existing path
     // unchanged; DirectML/CPU are dispatched before CUDA initialization.
     if (argc == 2 && std::string(argv[1]) == "--list-devices") {
@@ -2811,4 +2811,34 @@ int main(int argc, char** argv) {
     return 0;
 }
 
+int wmain(int argc, wchar_t** argv) {
+    std::vector<std::string> utf8Args;
+    std::vector<char*> utf8Argv;
+    utf8Args.reserve(static_cast<size_t>(argc));
+    utf8Argv.reserve(static_cast<size_t>(argc));
+    for (int i = 0; i < argc; ++i) {
+        const wchar_t* input = argv[i] ? argv[i] : L"";
+        const int required = WideCharToMultiByte(
+            CP_UTF8, WC_ERR_INVALID_CHARS, input, -1,
+            nullptr, 0, nullptr, nullptr);
+        if (required <= 0) {
+            std::cerr << "ERROR: invalid UTF-16 argument at index " << i
+                      << ", Win32=" << GetLastError() << '\n';
+            return 2;
+        }
+        std::string value(static_cast<size_t>(required), '\0');
+        const int converted = WideCharToMultiByte(
+            CP_UTF8, WC_ERR_INVALID_CHARS, input, -1,
+            value.data(), required, nullptr, nullptr);
+        if (converted != required) {
+            std::cerr << "ERROR: UTF-16 to UTF-8 conversion failed at index "
+                      << i << ", Win32=" << GetLastError() << '\n';
+            return 2;
+        }
+        value.pop_back();
+        utf8Args.push_back(std::move(value));
+    }
+    for (auto& arg : utf8Args) utf8Argv.push_back(arg.data());
+    return workerMain(argc, utf8Argv.data());
+}
 
