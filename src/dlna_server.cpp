@@ -3611,7 +3611,6 @@ void DlnaServer::HandleAiPassthroughStream(SOCKET client,
     // Generic DLNA clients may open independent Range/PCR probe GETs while the
     // main playback GET is still active.  Those requests must not be treated as
     // replacement playback streams; this preserves the previously working
-    // generic/DeoVR resident-worker behavior.
     const bool useStreamHandoff = g_r800zz_vrplayer_request;
     const uint64_t aiStreamGeneration = useStreamHandoff
         ? g_ai_stream_generation.fetch_add(1, std::memory_order_acq_rel) + 1

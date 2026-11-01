@@ -2170,7 +2170,7 @@ static int workerMain(int argc, char** argv) {
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
     av_log_set_level(AV_LOG_ERROR);
-    logLine("build=DeoVR_Search_NoEraseRedraw_SkyBlueUI_TitleLinks");
+    logLine("start");
 
     if (argc >= 2 && std::string(argv[1]) == "--probe-gpu") {
         std::filesystem::path model;
