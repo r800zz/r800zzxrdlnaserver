@@ -2,6 +2,7 @@
 
 [English](README.md) | [Русский](README_ru.md) | [Español](README_es.md) | [ภาษาไทย](README_th.md) | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
+### Ver 1.4 : 考虑包含非 ASCII 字符的文件名。（需要 r800zzvrplayer 1.6。）
 ### Ver 1.3.1 : 新增对以前不支持的视频格式的支持。（需要 r800zzvrplayer 1.5。）
 ### Ver 1.2 : 新增“Direct HTTP only”功能。
 DLNA 允许家庭网络中的智能电视等设备访问文件。  
